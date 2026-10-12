@@ -1,0 +1,32 @@
+# Postgres for PayBridge on the server, in Docker. Only the database runs here; the API and
+# the worker run under pm2 and reach it on localhost.
+#
+#   docker compose up -d        (run from the repo root, next to .env)
+#
+# The password comes from POSTGRES_PASSWORD in .env, which must match the one in DATABASE_URL.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: paybridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paybridge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: paybridge
+    ports:
+      # Localhost only: never reachable from the internet. 5435 so it cannot clash with
+      # another Postgres already on 5432.
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - paybridge-pg:/var/lib/postgresql/data
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paybridge -d paybridge"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  paybridge-pg:
