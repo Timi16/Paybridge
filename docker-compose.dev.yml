@@ -1,0 +1,19 @@
+# Local development database. Start with: pnpm db:up
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: paybridge
+      POSTGRES_PASSWORD: paybridge
+      POSTGRES_DB: paybridge
+    ports:
+      - "127.0.0.1:5436:5432"
+    volumes:
+      - paybridge-dev-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paybridge -d paybridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  paybridge-dev-pg:
