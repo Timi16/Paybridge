@@ -1,0 +1,112 @@
+# PayBridge
+
+Payment requests on **Stellar Testnet** (no real money). A merchant creates a request,
+PayBridge gives it a memo and a checkout link, the customer pays, and the worker detects and
+verifies the payment. Wrong, partial, duplicate, late and expired payments are all
+recognised and shown, never silently ignored. PayBridge is non-custodial: it never holds a
+secret key or moves funds.
+
+The spec lives in [docs/](docs/). `apps/api` is the backend (API + worker); `apps/web` is the Next.js dashboard and checkout.
+
+## Run it locally
+
+Needs Node 22+, pnpm and a Postgres 16 database (`pnpm db:up` starts one in Docker if you have it; otherwise point `DATABASE_URL` at your own).
+
+```sh
+pnpm install
+cp .env.example .env            # then set SESSION_SECRET: openssl rand -hex 32
+pnpm db:up                      # Postgres 16 on localhost:5436
+pnpm --filter @paybridge/api db:deploy
+pnpm dev                        # API on :4200  (reference at /docs)
+pnpm dev:worker                 # ingestion, reconciliation, watchdog, expiry sweeper
+pnpm seed                       # optional demo data: demo@paybridge.test / demo-password-123
+```
+
+## Web app
+
+`apps/web` is the Next.js app: landing page, sign-up and sign-in, the merchant dashboard and the
+public checkout at `/pay/{publicId}`. Its design system is in [apps/web/DESIGN.md](apps/web/DESIGN.md).
+
+```sh
+cp apps/web/.env.example apps/web/.env.local   # point NEXT_PUBLIC_API_URL at the API
+pnpm --filter @paybridge/web dev                 # http://localhost:3000
+```
+
+The API only accepts the dashboard from `WEB_ORIGIN` (CORS and the CSRF check), so that value in
+`.env` must be exactly the origin the web app is served from. In production the web app and the API
+must share a registrable domain (e.g. `paybridge.example.com` and `api.paybridge.example.com`) so the
+session cookie is sent. Wallet verification and "Pay with Freighter" need the Freighter browser
+extension set to Testnet. Password reset emails need `SMTP_URL`; in development the email is printed
+in the API log instead.
+
+## Checks
+
+```sh
+pnpm lint && pnpm typecheck && pnpm test
+```
+
+`pnpm test` starts a throwaway Postgres with Testcontainers when Docker is available; without
+Docker, set `TEST_DATABASE_URL` to an empty database and the tests use that instead. Every edge case in the spec has a test named with its ID;
+`grep -rhoE '"(P|T|M|C|S)[0-9]+' apps/api/test | sort -u` lists them.
+
+## Proving it on real testnet
+
+```sh
+pnpm scenario -- --print-issuer   # prints USDC_ISSUER=G…; put it in .env and restart api + worker
+pnpm scenario                     # every P and T case on testnet (about 10 minutes)
+pnpm scenario -- --skip-timing    # without the 5-minute expiry waits
+```
+
+The scenario uses its own "USDC" issuer so it can mint freely; switch `USDC_ISSUER` back to
+Circle's testnet issuer afterwards.
+
+## Environment
+
+See [.env.example](.env.example). `config/env.ts` validates everything at boot and refuses
+to start on any network but testnet.
+
+## Deploy
+
+**Backend (pm2).** The API and the worker are two pm2 processes from one build, defined in
+[ecosystem.config.cjs](ecosystem.config.cjs). On the server (Node 22+, pnpm, pm2, Docker for Postgres):
+
+```sh
+git clone <repo> ~/paybridge && cd ~/paybridge
+cp .env.example .env            # fill in: NODE_ENV=production, WEB_ORIGIN, SESSION_SECRET, DATABASE_URL, POSTGRES_PASSWORD
+docker compose up -d            # Postgres in Docker (compose.yaml), on localhost:5436
+pnpm install --frozen-lockfile
+pnpm --filter @paybridge/api db:deploy
+pnpm build
+pm2 start ecosystem.config.cjs && pm2 save && pm2 startup
+```
+
+Later deploys: `./deploy/deploy.sh <git sha>` pulls, migrates, builds, runs `pm2 reload`, polls
+`/health` for 60 s and rolls back to the previous commit if it stays unhealthy.
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs audit, lint, typecheck, tests and both builds,
+then calls that script over SSH.
+
+- Run exactly **one** `paybridge-worker`.
+- Put Caddy in front ([deploy/Caddyfile.snippet](deploy/Caddyfile.snippet)) for HTTPS; the API listens on
+  `127.0.0.1` and trusts exactly one proxy hop.
+- Log rotation: `pm2 install pm2-logrotate`.
+
+**Web app (Vercel).** Import the repo in Vercel with **Root Directory = `apps/web`** and set
+`NEXT_PUBLIC_API_URL` (e.g. `https://api.paybridge.example.com`) and `NEXT_PUBLIC_HORIZON_URL`.
+Two things must line up or sign-in will not work:
+
+- The API's `WEB_ORIGIN` must be exactly the address the site is served from (scheme and host, no
+  trailing slash). Preview deployments on other addresses are refused by the API.
+- The site and the API must share a registrable domain (`paybridge.example.com` and
+  `api.paybridge.example.com`). On a `*.vercel.app` address with the API elsewhere, browsers treat the
+  session cookie as third-party and drop it. Use a custom domain for both.
+
+## Runbook
+
+| Symptom | What to check |
+| --- | --- |
+| `/health` is 503 | Postgres is down or unreachable. The worker pauses and resumes by itself. |
+| `lagSeconds` keeps growing | Worker logs. RPC down: it backs off (1 s → 30 s) and catches up. Nothing expires while it is behind. |
+| "Worker heartbeat is stale" alert | The worker exited so pm2 restarts it; it resumes from the saved cursor. |
+| "Testnet reset detected" alert | Expected a few times a year. Open requests were closed as `NETWORK_RESET`; merchants re-create them. |
+| "Backfilled ledgers … from Horizon" alert | The worker was down longer than RPC keeps history; the gap was filled from Horizon. |
+| A payment is missing | `GET /v1/payments?unmatched=true`: no or wrong memo lands there and can be assigned. |
