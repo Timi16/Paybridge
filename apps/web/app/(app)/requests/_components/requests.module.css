@@ -1,0 +1,167 @@
+/* Requests list and request detail: one-off layout and the motion the shared kit lacks.
+   Every animation here is switched off at the end of the file for reduced motion. */
+
+@keyframes rqTick { to { stroke-dashoffset: 0; } }
+@keyframes rqPop { from { opacity: 0; transform: scale(0.4); } to { opacity: 1; transform: none; } }
+@keyframes rqRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes rqLine { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes rqCellFlash { from { background-color: var(--brand-tint); } to { background-color: transparent; } }
+@keyframes rqSpin { to { transform: rotate(360deg); } }
+@keyframes rqBreathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes rqGlow { 0% { box-shadow: 0 0 0 0 rgba(21, 128, 61, 0.45); } 100% { box-shadow: 0 0 0 18px rgba(21, 128, 61, 0); } }
+@keyframes rqSheen { from { transform: translateX(-120%) skewX(-20deg); } to { transform: translateX(420%) skewX(-20deg); } }
+
+/* ───────── Requests list ───────── */
+
+.headTools { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; min-width: 0; max-width: 100%; }
+
+/* The search field grows a little when it has focus. */
+.search { position: relative; flex: 0 1 auto; width: 300px; max-width: 100%; min-width: 0; transition: width 0.3s var(--ease-out); }
+.search:focus-within { width: 340px; }
+.searchIcon { position: absolute; left: 12px; top: 15px; color: var(--slate); display: inline-flex; pointer-events: none; transition: color 0.2s var(--ease-out), transform 0.3s var(--ease-spring); }
+.search:focus-within .searchIcon { color: var(--brand); transform: scale(1.15) rotate(-8deg); }
+.searchInput { width: 100%; height: 46px; border: 1px solid var(--border-input); border-radius: 10px; padding: 0 14px 0 36px; font-size: 15px; background: var(--surface); transition: border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out); }
+.searchInput::placeholder { color: var(--slate-soft); }
+.searchInput:hover { border-color: var(--slate-soft); }
+.searchInput:focus { box-shadow: 0 0 0 4px rgba(30, 79, 214, 0.12); }
+
+/* Status chips: one indicator slides to whichever chip is on. */
+.chips { position: relative; display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  position: relative; z-index: 1; height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--slate-strong); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px;
+  transition: color 0.2s var(--ease-out), border-color 0.2s var(--ease-out), background-color 0.2s var(--ease-out), transform 0.12s var(--ease-out);
+}
+.chip:hover { border-color: var(--border-input); }
+.chip:active { transform: scale(0.96); }
+.chipOn { border-color: transparent; background: transparent; color: var(--brand-dark); font-weight: 700; }
+.chipOn:hover { border-color: transparent; }
+/* Before the indicator has been measured the active chip carries its own fill. */
+.chipSolid { border-color: var(--brand); background: var(--brand-tint); color: var(--brand-dark); font-weight: 700; }
+.chipInk {
+  position: absolute; left: 0; top: 0; z-index: 0; border-radius: 999px; border: 1px solid var(--brand); background: var(--brand-tint); pointer-events: none;
+  transition: transform 0.38s var(--ease-spring), width 0.3s var(--ease-out), height 0.3s var(--ease-out);
+}
+
+.row { cursor: pointer; }
+.rowFlash > td { animation: rqCellFlash 1.8s ease-out; }
+.clip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.pager { height: 38px; padding: 0 14px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); border-radius: 8px; font-weight: 700; font-size: 13px; transition: background-color 0.2s var(--ease-out), transform 0.12s var(--ease-out); }
+.pager:hover:not(:disabled) { background: var(--row); transform: translateY(-1px); }
+.pager:disabled { color: var(--slate-soft); opacity: 1; }
+.foot { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--slate); }
+
+/* ───────── Copy buttons that morph to a tick ───────── */
+
+.copy {
+  height: 38px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink); border-radius: 8px; font-weight: 700; font-size: 13px; white-space: nowrap; text-decoration: none;
+  transition: background-color 0.25s var(--ease-out), border-color 0.25s var(--ease-out), color 0.2s var(--ease-out), transform 0.12s var(--ease-out);
+}
+.copy:hover { background: var(--row); border-color: var(--border-input); color: var(--ink); text-decoration: none; }
+.copy:active { transform: scale(0.95); }
+.copyXs { height: 30px; padding: 0 10px; }
+.copyIcon { width: 30px; height: 30px; padding: 0; border-radius: 8px; color: var(--slate-strong); }
+.copyLg { height: 46px; padding: 0 18px; border-radius: 10px; border-color: var(--border-input); font-size: 15px; gap: 8px; }
+.copied, .copied:hover { background: var(--good-bg); border-color: #bbf7d0; color: var(--good); }
+.copied .glyph { animation: rqPop 0.35s var(--ease-spring) both; }
+.tick { stroke-dasharray: 24; stroke-dashoffset: 24; animation: rqTick 0.3s ease-out 0.1s forwards; }
+
+/* ───────── Request detail ───────── */
+
+.back { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--slate); align-self: flex-start; }
+.back svg { transition: transform 0.25s var(--ease-spring); }
+.back:hover { text-decoration: none; }
+.back:hover svg { transform: translateX(-3px); }
+.head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; }
+.amount { margin: 0; font-family: var(--font-mono); font-size: 34px; font-weight: 600; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.amountCode { font-family: var(--font-sans); font-size: 18px; font-weight: 700; color: var(--slate); }
+.bigPill :global(.pill) { font-size: 14px; padding: 5px 11px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.actions :global(.btn) { font-size: 15px; }
+.spinning { animation: rqSpin 0.8s linear infinite; }
+
+.banner {
+  position: relative; overflow: hidden; padding: 14px 16px; border-radius: 12px; display: flex; gap: 12px; align-items: flex-start; font-size: 14px; line-height: 1.5;
+  transition: background-color 0.7s var(--ease-out), color 0.7s var(--ease-out);
+}
+.bannerPending { background: var(--info-bg); color: var(--info); align-items: center; }
+.bannerUnderpaid { background: var(--warn-bg); color: var(--warn); }
+.bannerFailed { background: var(--bad-bg); color: var(--bad); }
+.bannerMuted { background: var(--border); color: var(--slate); }
+.bannerPaid { background: var(--good-bg); color: var(--good); align-items: center; }
+.bannerRefunded { background: var(--brand-tint); color: var(--brand-dark); }
+.bannerLead { display: inline-flex; align-items: center; gap: 12px; flex-shrink: 0; animation: rqPop 0.4s var(--ease-spring) both; }
+.bannerText { min-width: 0; animation: rqRise 0.45s var(--ease-out) both; }
+.bannerText strong { font-weight: 800; }
+.bannerIcon { flex-shrink: 0; margin-top: 1px; animation: rqPop 0.4s var(--ease-spring) both; }
+.paidDisc { width: 32px; height: 32px; border-radius: 50%; background: var(--good); color: #fff; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+/* The one-time "it just got paid" moment. */
+.banner.celebrate { animation: rqGlow 1.4s ease-out 0.2s 2; }
+.banner.celebrate::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 30%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent); animation: rqSheen 1.3s ease-out 0.3s both; pointer-events: none; }
+/* Time left on the link, draining. */
+.drain { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(3, 105, 161, 0.14); }
+.drainFill { display: block; height: 100%; background: currentColor; transform-origin: left center; transition: transform 1s linear; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; display: flex; flex-direction: column; min-width: 0; }
+.panelTitle { font-size: 14px; font-weight: 800; }
+.kv { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--border-soft); font-size: 14px; }
+.kv:last-child { border-bottom: none; }
+.kvLabel { color: var(--slate); flex-shrink: 0; }
+.kvValue { font-family: var(--font-mono); font-weight: 600; text-align: right; min-width: 0; overflow-wrap: anywhere; display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.hash { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; background: var(--row); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 13px; word-break: break-all; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; font-size: 13px; }
+.fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; animation: rqRise 0.4s var(--ease-out) both; }
+.factValue { font-family: var(--font-mono); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.disclosure summary { cursor: pointer; font-size: 13px; color: var(--brand); font-weight: 600; }
+.disclosure[open] > div { animation: rqRise 0.3s var(--ease-out) both; }
+.avatar { width: 40px; height: 40px; flex-shrink: 0; border-radius: 50%; background: var(--brand-tint); color: var(--brand-dark); display: flex; align-items: center; justify-content: center; font-weight: 800; animation: rqPop 0.45s var(--ease-spring) 0.25s both; }
+.refund { background: var(--attention-bg); border: 1px solid var(--attention-border); border-radius: 14px; padding: 18px 22px; display: flex; flex-direction: column; gap: 12px; color: #713f12; }
+.refundRow { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+
+/* Verification: the rail draws downwards and each event ticks in turn (--i is its position). */
+.tl { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.tlRow { display: flex; gap: 14px; min-height: 58px; }
+.tlRail { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
+.tlDot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #fff; animation: rqPop 0.4s var(--ease-spring) both; animation-delay: calc(var(--i, 0) * 150ms); }
+.tlDot path { stroke-dasharray: 30; stroke-dashoffset: 30; animation: rqTick 0.35s ease-out forwards; animation-delay: calc(var(--i, 0) * 150ms + 200ms); }
+.tlGood { background: var(--good); }
+.tlWarn { background: var(--warn); }
+.tlBad { background: var(--bad); }
+.tlMuted { background: var(--slate); }
+.tlTodo { background: var(--surface); border: 1.5px dashed var(--border-input); }
+.tlTodo::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: rqBreathe 1.4s ease-in-out infinite; }
+.tlLine { flex: 1; width: 2px; margin: 4px 0; background: var(--border-input); transform-origin: top center; animation: rqLine 0.4s ease-out both; animation-delay: calc(var(--i, 0) * 150ms + 120ms); }
+.tlBody { display: flex; flex-direction: column; gap: 3px; padding-bottom: 14px; flex: 1; min-width: 0; animation: rqRise 0.4s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 150ms + 40ms); }
+.tlTop { display: flex; justify-content: space-between; gap: 12px; }
+.tlTitle { font-size: 14px; font-weight: 700; }
+.tlTitleTodo { color: var(--slate-soft); }
+.tlTime { font-size: 12px; color: var(--slate); font-family: var(--font-mono); white-space: nowrap; }
+.tlSub { font-size: 13px; color: var(--slate); overflow-wrap: anywhere; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.check { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px 1px 6px; border-radius: 999px; font-size: 12px; font-weight: 600; animation: rqPop 0.3s var(--ease-spring) both; animation-delay: calc(var(--i, 0) * 150ms + 320ms + var(--j, 0) * 110ms); }
+.checkOk { background: var(--good-bg); color: var(--good); }
+.checkNo { background: var(--bad-bg); color: var(--bad); }
+
+@media (max-width: 1180px) {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .amount { font-size: 28px; }
+  .panel { padding: 18px 16px; }
+  .search, .search:focus-within { width: 100%; }
+  .kv { flex-wrap: wrap; gap: 4px 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search, .searchIcon, .searchInput, .chip, .chipInk, .copy, .pager, .back svg, .banner, .drainFill { transition: none !important; }
+  .rowFlash > td, .copied .glyph, .bannerLead, .bannerText, .bannerIcon, .banner.celebrate, .banner.celebrate::after, .fact, .avatar,
+  .disclosure[open] > div, .tlDot, .tlLine, .tlBody, .check, .tlTodo::after { animation: none !important; }
+  .banner.celebrate::after { display: none; }
+  /* Strokes that were waiting to be drawn are simply shown. */
+  .tick, .tlDot path { animation: none !important; stroke-dashoffset: 0; }
+  /* Kept, slower: "Check now" working is information, not decoration. */
+  .spinning { animation: rqSpin 1.6s linear infinite !important; }
+}
