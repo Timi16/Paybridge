@@ -103,7 +103,7 @@
 .box { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
 .boxLabel { font-size: 12px; font-weight: 700; color: var(--slate); }
 .line { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-width: 0; }
-.address { flex: 1; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; display: flex; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
+.address { flex: 1; font-family: var(--font-mono); font-size: 16px; font-weight: 600; line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
 .copy { height: 38px; min-width: 76px; padding: 0 12px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); border-radius: 8px; font-size: 13px; font-weight: 700; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px; transition: background-color 0.2s, border-color 0.2s, color 0.2s, transform 0.15s; }
 .copy:hover { border-color: var(--slate-soft); }
 .copy:active { transform: scale(0.95); }

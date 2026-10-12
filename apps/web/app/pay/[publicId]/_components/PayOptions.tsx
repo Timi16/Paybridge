@@ -261,7 +261,6 @@ function ManualPanel({ checkout, onSent }: Props) {
   const { asset } = checkout;
   // What a wallet's amount box accepts: no thousands separators.
   const plainAmount = formatAmount(checkout.amountRemaining).replace(/,/g, "");
-  const groups = checkout.wallet.match(/.{1,8}/g) ?? [checkout.wallet];
 
   return (
     <>
@@ -276,16 +275,8 @@ function ManualPanel({ checkout, onSent }: Props) {
       <div className={styles.box}>
         <span className={styles.boxLabel}>Send to</span>
         <div className={styles.line}>
-          {/* Shown in groups of 8 so it can be checked by eye; the groups are spaced with CSS, so selecting it copies no spaces. */}
           <span className={styles.address}>
-            <span className="sr-only" style={{ userSelect: "none" }}>
-              {checkout.wallet}
-            </span>
-            {groups.map((group, i) => (
-              <span key={i} aria-hidden="true">
-                {group}
-              </span>
-            ))}
+            {checkout.wallet}
           </span>
           <CopyChip value={checkout.wallet} what="address" />
         </div>
