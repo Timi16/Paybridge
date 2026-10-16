@@ -9,11 +9,6 @@ export function randomBase62(length: number): string {
   return out;
 }
 
-/** 12 random base62 chars (~71 bits): the unguessable id in /pay/{publicId}. */
-export function generatePublicId(): string {
-  return randomBase62(12);
-}
-
 export const API_KEY_PREFIX = "pb_test_";
 
 /** pb_test_ + 43 base62 chars (~256 bits). Only the SHA-256 is stored. */

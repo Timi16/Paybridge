@@ -26,17 +26,16 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: "Validation or business-rule failure",
   401: "No or bad session / API key",
   403: "CSRF check failed",
-  404: "Missing, or belongs to another merchant",
+  404: "Missing, or belongs to another company",
   409: "Conflict with the current state",
   429: "Rate limited (see Retry-After)",
   503: "Dependency unavailable",
 };
 
 /**
- * The public API reference: what a developer can do with an API key, plus the open checkout
- * and health routes. Dashboard-only routes (sign-in, sessions, API-key and wallet management,
- * the dashboard's live stream) work only with the dashboard's session cookie, so they are
- * left out of the published document.
+ * The public API reference: what a developer can do with an API key, plus health. Dashboard-only
+ * routes (sign-in, sessions, API-key and wallet management) work only with the dashboard's
+ * session cookie, so they are left out of the published document.
  */
 export function buildOpenApiDocument(serverUrl?: string) {
   const registry = new OpenAPIRegistry();
@@ -48,12 +47,14 @@ export function buildOpenApiDocument(serverUrl?: string) {
 
   const ErrorResponse = registry.register("Error", s.ErrorResponseSchema);
   const schemas = {
-    PaymentRequest: registry.register("PaymentRequest", s.RequestSchema),
-    ChainPayment: registry.register("ChainPayment", s.PaymentSchema),
-    RequestEvent: registry.register("RequestEvent", s.RequestEventSchema),
-    Checkout: registry.register("Checkout", s.CheckoutSchema),
+    Employee: registry.register("Employee", s.EmployeeSchema),
+    Group: registry.register("Group", s.GroupSchema),
+    PayrollRun: registry.register("PayrollRun", s.RunSchema),
     Health: registry.register("Health", s.HealthSchema),
   };
+  void schemas.Employee;
+  void schemas.Group;
+  void schemas.PayrollRun;
 
   const add = (spec: RouteSpec) => {
     // Dashboard-only: not usable with an API key, so not part of the published reference.
@@ -90,19 +91,18 @@ export function buildOpenApiDocument(serverUrl?: string) {
   };
 
   const noStrict = <T extends z.AnyZodObject>(schema: T) => schema;
-  const sse = z.string().openapi({ description: "text/event-stream" });
 
   // Auth
-  add({ method: "post", path: "/auth/signup", summary: "Create a merchant account", tag: "Auth", auth: "public", body: s.SignupBody, success: { 201: s.MerchantResponse }, errors: [400, 403, 409] });
-  add({ method: "post", path: "/auth/login", summary: "Log in", tag: "Auth", auth: "public", body: s.LoginBody, success: { 200: s.MerchantResponse }, errors: [400, 401, 403] });
+  add({ method: "post", path: "/auth/signup", summary: "Create a company account", tag: "Auth", auth: "public", body: s.SignupBody, success: { 201: s.CompanyResponse }, errors: [400, 403, 409] });
+  add({ method: "post", path: "/auth/login", summary: "Log in", tag: "Auth", auth: "public", body: s.LoginBody, success: { 200: s.CompanyResponse }, errors: [400, 401, 403] });
   add({ method: "post", path: "/auth/logout", summary: "Log out", tag: "Auth", auth: "session", success: { 204: null }, errors: [403] });
-  add({ method: "get", path: "/auth/me", summary: "Current merchant", tag: "Auth", auth: "session", success: { 200: s.MerchantResponse } });
+  add({ method: "get", path: "/auth/me", summary: "Current company", tag: "Auth", auth: "session", success: { 200: s.CompanyResponse } });
   add({ method: "post", path: "/auth/password/forgot", summary: "Email a one-hour password reset link (same answer whether or not the account exists)", tag: "Auth", auth: "public", body: s.ForgotPasswordBody, success: { 204: null }, errors: [400, 403, 503] });
   add({ method: "post", path: "/auth/password/reset", summary: "Set a new password from an emailed link; signs out everywhere", tag: "Auth", auth: "public", body: s.ResetPasswordBody, success: { 204: null }, errors: [400, 403] });
-  add({ method: "get", path: "/auth/sessions", summary: "Where the merchant is signed in", tag: "Auth", auth: "session", success: { 200: s.SessionListResponse } });
+  add({ method: "get", path: "/auth/sessions", summary: "Where the company is signed in", tag: "Auth", auth: "session", success: { 200: s.SessionListResponse } });
   add({ method: "delete", path: "/auth/sessions/{id}", summary: "Sign one session out", tag: "Auth", auth: "session", params: s.SessionIdParamsSchema, success: { 204: null }, errors: [403, 404] });
   add({ method: "post", path: "/auth/sessions/logout-others", summary: "Sign out every other session", tag: "Auth", auth: "session", success: { 204: null }, errors: [403] });
-  add({ method: "post", path: "/auth/settings", summary: "Update merchant settings (business name, support contact, request defaults, matching by exact amount)", tag: "Auth", auth: "session", body: s.UpdateSettingsBody, success: { 200: s.MerchantResponse }, errors: [400, 403] });
+  add({ method: "post", path: "/auth/settings", summary: "Update company settings (name, notification emails)", tag: "Auth", auth: "session", body: s.UpdateSettingsBody, success: { 200: s.CompanyResponse }, errors: [400, 403] });
   add({ method: "post", path: "/auth/password", summary: "Change password (other sessions are signed out)", tag: "Auth", auth: "session", body: s.ChangePasswordBody, success: { 204: null }, errors: [400, 403] });
 
   // API keys
@@ -112,43 +112,46 @@ export function buildOpenApiDocument(serverUrl?: string) {
 
   // Wallets
   add({ method: "get", path: "/v1/wallets", summary: "List wallets", tag: "Wallets", auth: "session", success: { 200: s.WalletListResponse } });
-  add({ method: "post", path: "/v1/wallets", summary: "Add a wallet (unverified)", tag: "Wallets", auth: "session", body: s.AddWalletBody, success: { 201: s.WalletResponse }, errors: [400, 403, 409] });
+  add({ method: "post", path: "/v1/wallets", summary: "Add a funding wallet", tag: "Wallets", auth: "session", body: s.AddWalletBody, success: { 201: s.WalletResponse }, errors: [400, 403, 409] });
   add({ method: "post", path: "/v1/wallets/{id}/refresh", summary: "Re-check the account and trustlines on Horizon", tag: "Wallets", auth: "session", params: s.IdParamsSchema, success: { 200: s.WalletResponse }, errors: [403, 404, 503] });
   add({ method: "post", path: "/v1/wallets/{id}/challenge", summary: "Issue an ownership challenge to sign (SEP-53)", tag: "Wallets", auth: "session", params: s.IdParamsSchema, success: { 200: s.ChallengeResponse }, errors: [403, 404] });
   add({ method: "post", path: "/v1/wallets/{id}/verify", summary: "Verify the signed challenge", tag: "Wallets", auth: "session", params: s.IdParamsSchema, body: s.VerifyWalletBody, success: { 200: s.WalletResponse }, errors: [400, 403, 404] });
-  add({ method: "delete", path: "/v1/wallets/{id}", summary: "Remove a wallet (soft; watched until its open requests close)", tag: "Wallets", auth: "session", params: s.IdParamsSchema, success: { 204: null }, errors: [403, 404] });
+  add({ method: "delete", path: "/v1/wallets/{id}", summary: "Remove a funding wallet (refused while an open run uses it)", tag: "Wallets", auth: "session", params: s.IdParamsSchema, success: { 204: null }, errors: [403, 404] });
 
-  // Payment requests
-  add({
-    method: "post", path: "/v1/payment-requests", summary: "Create a payment request", tag: "Payment requests", auth: "any",
-    body: s.CreateRequestBody,
-    headers: z.object({ "Idempotency-Key": s.IdempotencyKeySchema.optional() }),
-    success: { 201: s.RequestCreatedResponse, 200: s.RequestCreatedResponse },
-    errors: [400, 403, 404, 409, 503],
-    description: "Returns 201 for a new request. With an Idempotency-Key that was already used, returns the original request with 200, or 409 IDEMPOTENCY_MISMATCH if the body differs.",
-  });
-  add({ method: "get", path: "/v1/payment-requests", summary: "List payment requests", tag: "Payment requests", auth: "any", query: s.ListRequestsQuery, success: { 200: s.RequestListResponse }, errors: [400] });
-  add({ method: "get", path: "/v1/payment-requests/{id}", summary: "Get a payment request", description: "The request with every payment linked to it (whatever the outcome) and its history.", tag: "Payment requests", auth: "any", params: s.IdParamsSchema, success: { 200: s.RequestDetailResponse }, errors: [404] });
-  add({ method: "post", path: "/v1/payment-requests/{id}/cancel", summary: "Cancel a payment request", description: "Only a PENDING request can be cancelled.", tag: "Payment requests", auth: "any", params: s.IdParamsSchema, success: { 200: s.RequestResponse }, errors: [403, 404, 409] });
-  add({ method: "post", path: "/v1/payment-requests/{id}/accept", summary: "Accept as paid", description: "Marks the request PAID for what was received: an UNDERPAID request, an EXPIRED one with a late payment, or a CANCELLED one with a payment that arrived after the cancel.", tag: "Payment requests", auth: "any", params: s.IdParamsSchema, success: { 200: s.RequestResponse }, errors: [403, 404, 409] });
+  // Groups
+  add({ method: "get", path: "/v1/groups", summary: "List groups", tag: "People", auth: "any", success: { 200: s.GroupListResponse } });
+  add({ method: "post", path: "/v1/groups", summary: "Create a group", tag: "People", auth: "any", body: s.GroupNameBody, success: { 201: s.GroupResponse }, errors: [400, 403, 409] });
+  add({ method: "patch", path: "/v1/groups/{id}", summary: "Rename a group", tag: "People", auth: "any", params: s.IdParamsSchema, body: s.GroupNameBody, success: { 200: s.GroupResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "delete", path: "/v1/groups/{id}", summary: "Delete a group (its people become ungrouped)", tag: "People", auth: "any", params: s.IdParamsSchema, success: { 204: null }, errors: [403, 404] });
 
-  add({ method: "get", path: "/v1/payment-requests/stats", summary: "Count requests by status", description: "Counts per status under the same filters as the list.", tag: "Payment requests", auth: "any", query: s.RequestStatsQuery, success: { 200: s.RequestStatsResponse }, errors: [400] });
-  add({ method: "post", path: "/v1/payment-requests/{id}/refunded", summary: "Mark a request refunded", description: "Records that you sent back what the request itself owed: the excess over the amount asked, or money counted before it closed. PayBridge never moves funds; this only records it.", tag: "Payment requests", auth: "any", params: s.IdParamsSchema, body: s.MarkRefundedBody, success: { 200: s.RequestResponse }, errors: [400, 403, 404, 409] });
-  add({ method: "get", path: "/v1/summary", summary: "Get an overview", description: "Collected per asset, requests created and settled, open requests, and what needs attention, since `from`.", tag: "Payment requests", auth: "any", query: s.SummaryQuery, success: { 200: s.SummaryResponse }, errors: [400] });
+  // Employees
+  add({ method: "get", path: "/v1/employees", summary: "List people", description: "Sorted by name. `groupId=none` lists people in no group.", tag: "People", auth: "any", query: s.EmployeeListQuery, success: { 200: s.EmployeeListResponse }, errors: [400] });
+  add({ method: "post", path: "/v1/employees", summary: "Add a person", description: "Their wallet is checked on Stellar Testnet right away (best effort): it must exist and have a USDC trustline to be paid.", tag: "People", auth: "any", body: s.CreateEmployeeBody, success: { 201: s.EmployeeResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "post", path: "/v1/employees/import", summary: "Import people", description: "Up to 500 at once, all or nothing. Groups are matched by name and created when missing.", tag: "People", auth: "any", body: s.ImportEmployeesBody, success: { 201: s.ImportEmployeesResponse }, errors: [400, 403, 409, 413] });
+  add({ method: "post", path: "/v1/employees/check", summary: "Re-check wallets", description: "Fresh Stellar check of the given people (or the 200 checked longest ago).", tag: "People", auth: "any", body: s.CheckEmployeesBody, success: { 200: z.object({ data: z.array(s.EmployeeSchema) }) }, errors: [400, 403, 503] });
+  add({ method: "get", path: "/v1/employees/{id}", summary: "Get a person", tag: "People", auth: "any", params: s.IdParamsSchema, success: { 200: s.EmployeeResponse }, errors: [404] });
+  add({ method: "patch", path: "/v1/employees/{id}", summary: "Update a person", tag: "People", auth: "any", params: s.IdParamsSchema, body: s.UpdateEmployeeBody, success: { 200: s.EmployeeResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "post", path: "/v1/employees/{id}/archive", summary: "Archive a person", description: "Left out of new runs; kept on old ones.", tag: "People", auth: "any", params: s.IdParamsSchema, success: { 200: s.EmployeeResponse }, errors: [403, 404] });
+  add({ method: "post", path: "/v1/employees/{id}/restore", summary: "Restore an archived person", tag: "People", auth: "any", params: s.IdParamsSchema, success: { 200: s.EmployeeResponse }, errors: [403, 404, 409] });
 
-  add({ method: "get", path: "/v1/summary/daily", summary: "Daily totals", description: "Applied payments per local day for the last `days` days, oldest first.", tag: "Payment requests", auth: "any", query: s.DailyQuery, success: { 200: s.DailyResponse }, errors: [400] });
-  add({ method: "post", path: "/v1/payment-requests/{id}/receipt", summary: "Email a receipt", description: "Emails the customer a receipt for a paid request. Uses the request's customer email unless one is given.", tag: "Payment requests", auth: "any", params: s.IdParamsSchema, body: s.SendReceiptBody, success: { 200: z.object({ sentTo: z.string() }) }, errors: [400, 403, 404, 409, 503] });
+  // Payroll runs
+  add({ method: "get", path: "/v1/payroll-runs", summary: "List payroll runs", tag: "Payroll", auth: "any", query: s.RunListQuery, success: { 200: s.RunListResponse }, errors: [400] });
+  add({ method: "post", path: "/v1/payroll-runs", summary: "Create a draft run", description: "One line per active person in the groups and people given, at their default amount.", tag: "Payroll", auth: "any", body: s.CreateRunBody, success: { 201: s.RunResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "get", path: "/v1/payroll-runs/{id}", summary: "Get a run", description: "Every line with its status, failure reason and transaction hash; the batches; the history.", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 200: s.RunResponse }, errors: [404] });
+  add({ method: "patch", path: "/v1/payroll-runs/{id}", summary: "Rename, re-date or change the funding wallet (draft)", tag: "Payroll", auth: "any", params: s.IdParamsSchema, body: s.UpdateRunBody, success: { 200: s.RunResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "delete", path: "/v1/payroll-runs/{id}", summary: "Delete a draft", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 204: null }, errors: [403, 404, 409] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/items", summary: "Add people or groups (draft)", tag: "Payroll", auth: "any", params: s.IdParamsSchema, body: s.AddItemsBody, success: { 200: s.RunResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "patch", path: "/v1/payroll-runs/{id}/items/{itemId}", summary: "Change a line's amount (draft)", tag: "Payroll", auth: "any", params: s.RunItemParams, body: s.UpdateItemBody, success: { 200: s.RunResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "delete", path: "/v1/payroll-runs/{id}/items/{itemId}", summary: "Remove a line (draft)", tag: "Payroll", auth: "any", params: s.RunItemParams, success: { 200: s.RunResponse }, errors: [403, 404, 409] });
+  add({ method: "get", path: "/v1/payroll-runs/{id}/check", summary: "Pre-flight check", description: "Read-only. Who can receive USDC right now, and whether the funding wallet covers the rest plus fees.", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 200: s.RunCheckResponse }, errors: [404, 503] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/start", summary: "Start paying", description: "Checks everyone fresh. People who can't receive are marked failed and never sent anything; if the funding wallet can't cover the rest, nothing changes (400 INSUFFICIENT_FUNDS).", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 200: s.RunResponse }, errors: [400, 403, 404, 409, 503] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/batches/next", summary: "Get the next batch to sign", description: "Up to 100 payments in one unsigned transaction (base64 XDR) from the funding wallet, valid for a few minutes. While a batch is open the same one is returned. `batch: null` means nothing to sign right now.", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 200: s.NextBatchResponse }, errors: [400, 403, 404, 409, 503] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/batches/{batchId}/submit", summary: "Submit a signed batch", description: "The signed transaction must be exactly the one PayBridge built (400 TX_MISMATCH otherwise). 200 when Stellar gave a final answer, 202 when it is still pending (the worker settles it).", tag: "Payroll", auth: "any", params: s.RunBatchParams, body: s.SubmitBatchBody, success: { 200: s.SubmitBatchResponse, 202: s.SubmitBatchResponse }, errors: [400, 403, 404, 409] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/retry", summary: "Retry failed payments", description: "Failed lines that now pass a fresh check go back in the queue; a paid line is never sent again.", tag: "Payroll", auth: "any", params: s.IdParamsSchema, body: s.RetryBody, success: { 200: s.RunResponse }, errors: [400, 403, 404, 409, 503] });
+  add({ method: "post", path: "/v1/payroll-runs/{id}/cancel", summary: "Cancel", description: "A draft, or the unsent payments of a run being paid (not while a batch is open).", tag: "Payroll", auth: "any", params: s.IdParamsSchema, success: { 200: s.RunResponse }, errors: [403, 404, 409] });
+  add({ method: "get", path: "/v1/summary", summary: "Overview numbers", tag: "Payroll", auth: "any", success: { 200: s.SummarySchema } });
 
-  // Payments
-  add({ method: "post", path: "/v1/payments/{eventId}/refunded", summary: "Mark a payment refunded", description: "Records that you sent a payment back to its payer. Not for payments that were applied to a request. PayBridge never moves funds.", tag: "Payments", auth: "any", params: s.EventIdParamsSchema, body: s.MarkRefundedBody, success: { 200: s.PaymentResponse }, errors: [400, 403, 404, 409] });
-  add({ method: "get", path: "/v1/payments", summary: "List payments", description: "Every payment that reached your wallets. Use `unmatched=true` for the ones that could not be tied to a request.", tag: "Payments", auth: "any", query: s.ListPaymentsQuery, success: { 200: s.PaymentListResponse }, errors: [400] });
-  add({ method: "post", path: "/v1/payments/{eventId}/assign", summary: "Assign a payment", description: "Ties an unmatched payment to one of your requests on the same wallet and asset.", tag: "Payments", auth: "any", params: s.EventIdParamsSchema, body: s.AssignPaymentBody, success: { 200: s.AssignResponse }, errors: [400, 403, 404, 409] });
-
-  // Live + public
-  add({ method: "get", path: "/v1/stream", summary: "Merchant live stream (SSE): request.updated, payment.detected, wallet.updated", tag: "Live", auth: "session", success: { 200: sse } });
-  add({ method: "get", path: "/public/pay/{publicId}", summary: "Get checkout data", tag: "Public checkout", auth: "public", params: s.PublicIdParamsSchema, success: { 200: schemas.Checkout }, errors: [404] });
-  add({ method: "get", path: "/public/pay/{publicId}/events", summary: "Stream checkout status", description: "Server-Sent Events: a `status` event on connect and on every change.", tag: "Public checkout", auth: "public", params: s.PublicIdParamsSchema, success: { 200: sse }, errors: [404] });
-  add({ method: "get", path: "/health", summary: "Health", description: "Database status, last processed ledger, lag in seconds and open request count.", tag: "System", auth: "public", success: { 200: schemas.Health }, errors: [503] });
+  add({ method: "get", path: "/health", summary: "Health", description: "Database status and the number of batches still open.", tag: "System", auth: "public", success: { 200: schemas.Health }, errors: [503] });
 
   return new OpenApiGeneratorV3(registry.definitions).generateDocument({
     openapi: "3.0.3",
@@ -156,26 +159,26 @@ export function buildOpenApiDocument(serverUrl?: string) {
       title: "PayBridge API",
       version: "1.0.0",
       description: [
-        "Create payment requests on **Stellar Testnet** and find out the moment they are paid. No real money moves.",
+        "Run payroll in USDC on **Stellar Testnet**: people, groups, runs, and every payment tracked to its transaction hash. No real money moves.",
+        "",
+        "PayBridge never holds a secret key. It builds each batch as an unsigned transaction; you sign it with the funding wallet (Freighter in the dashboard, or your own signer) and send it back.",
         "",
         "## Getting started",
-        "1. In the PayBridge dashboard, add and verify the wallet you want to be paid into, and copy its id.",
-        "2. Create an API key under **API keys**. It is shown once; keep it on your server.",
-        "3. Send it on every request: `Authorization: Bearer pb_test_…`.",
-        "4. `POST /v1/payment-requests` and send your customer to the `checkoutUrl` in the response.",
+        "1. In the dashboard, add your funding wallet and create an API key under **API keys** (shown once).",
+        "2. Send it on every request: `Authorization: Bearer pb_test_…`.",
+        "3. `POST /v1/employees` for each person, then `POST /v1/payroll-runs`.",
+        "4. `POST /start`, then loop: `POST /batches/next` → sign the XDR → `POST /batches/{batchId}/submit`, until `batch` is null.",
         "",
         "## Conventions",
-        "- **Amounts** are decimal strings with up to 7 decimals (`\"50\"`, `\"0.5\"`); responses also carry the exact value in stroops.",
-        "- **Idempotency**: send an `Idempotency-Key` header when creating a request so a retry never creates a second one.",
+        "- **Amounts** are decimal strings with up to 7 decimals (`\"1500\"`, `\"0.5\"`); responses also carry the exact value in stroops.",
         "- **Errors** share one shape: `{ error: { code, message, details, requestId } }`.",
         "- **Pagination**: lists take `limit` and `cursor` and return `{ data, nextCursor }`.",
         "- **Rate limit**: 300 requests a minute per account; a 429 carries `Retry-After`.",
       ].join("\n"),
     },
     tags: [
-      { name: "Payment requests", description: "Create a request, follow it, cancel it, or accept what was paid." },
-      { name: "Payments", description: "Everything that reached your wallets, including payments that could not be matched." },
-      { name: "Public checkout", description: "What the hosted checkout page reads. No API key needed." },
+      { name: "People", description: "Employees, their wallets and default amounts, and groups." },
+      { name: "Payroll", description: "Draft a run, check it, start it, sign each batch, and follow every payment." },
       { name: "System" },
     ],
     servers: serverUrl ? [{ url: serverUrl }] : [],

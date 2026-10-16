@@ -1,16 +1,16 @@
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  addVerifiedWallet,
-  createRequest,
+  addFundingWallet,
+  createRun,
   makeApp,
-  makeEngine,
+  nextBatch,
   ORIGIN,
+  post,
   prisma,
   resetDb,
-  setupMerchant,
+  setupPayroll,
   signup,
-  USDC,
   type TestApp,
 } from "../helpers/harness";
 
@@ -33,7 +33,7 @@ describe("auth", () => {
   it("signs up, sets an httpOnly SameSite=Lax cookie, and never returns the password hash", async () => {
     const res = await anon().post("/auth/signup").set("Origin", ORIGIN).send({ ...creds, email: "  Owner@Shop.Example " });
     expect(res.status).toBe(201);
-    expect(res.body.merchant).toMatchObject({ email: "owner@shop.example", businessName: "Shop" });
+    expect(res.body.company).toMatchObject({ email: "owner@shop.example", businessName: "Shop" });
     expect(JSON.stringify(res.body)).not.toMatch(/password|argon/i);
     const cookie = String(res.headers["set-cookie"]);
     expect(cookie).toMatch(/^pb_session=[A-Za-z0-9_-]{43};/);
@@ -46,7 +46,7 @@ describe("auth", () => {
     expect(session.id).toMatch(/^[0-9a-f]{64}$/);
     const days = (session.expiresAt.getTime() - Date.now()) / 86_400_000;
     expect(days).toBeGreaterThan(13.9);
-    expect((await prisma.merchant.findFirstOrThrow()).passwordHash).toMatch(/^\$argon2id\$/);
+    expect((await prisma.company.findFirstOrThrow()).passwordHash).toMatch(/^\$argon2id\$/);
   });
 
   it("rejects weak passwords, bad emails, unknown fields and duplicate emails", async () => {
@@ -81,7 +81,7 @@ describe("auth", () => {
     // The presented session was replaced, not kept alongside the new one.
     expect(after).toHaveLength(before.length);
     expect(after.map((s) => s.id).sort()).not.toEqual(before.map((s) => s.id).sort());
-    expect((await agent.get("/auth/me")).body.merchant.email).toBe(creds.email);
+    expect((await agent.get("/auth/me")).body.company.email).toBe(creds.email);
   });
 
   it("locks the account with a growing delay after repeated failures", async () => {
@@ -94,7 +94,7 @@ describe("auth", () => {
     expect(Number.parseInt(locked.headers["retry-after"] as string, 10)).toBeGreaterThan(0);
   });
 
-  it("an attacker who knows the email cannot lock the merchant out of a browser they have used before", async () => {
+  it("an attacker who knows the email cannot lock the company out of a browser they have used before", async () => {
     const owner = request.agent(t.app); // signs up here, so this browser becomes a trusted device
     await owner.post("/auth/signup").set("Origin", ORIGIN).send(creds);
     const login = { email: creds.email, password: creds.password };
@@ -108,7 +108,7 @@ describe("auth", () => {
     const stranger = await anon().post("/auth/login").set("Origin", ORIGIN).set("X-Forwarded-For", "198.51.100.7").send(login);
     expect(stranger.status).toBe(429);
     expect(stranger.body.error.code).toBe("RATE_LIMITED");
-    // …but the merchant's own browser gets straight in.
+    // …but the company's own browser gets straight in.
     const mine = await owner.post("/auth/login").set("Origin", ORIGIN).send(login);
     expect(mine.status).toBe(200);
     // A successful login clears the account-wide lock for everyone.
@@ -129,7 +129,7 @@ describe("auth", () => {
     for (let i = 0; i < 25; i++) {
       await anon().post("/auth/login").set("Origin", ORIGIN).set("X-Forwarded-For", `203.0.113.${i + 1}`).send({ email: creds.email, password: "wrong password!" });
     }
-    // The attacker's own trusted-device cookie is for a different merchant: still locked.
+    // The attacker's own trusted-device cookie is for a different company: still locked.
     const res = await attacker.post("/auth/login").set("Origin", ORIGIN).set("X-Forwarded-For", "198.51.100.9").send({ email: creds.email, password: creds.password });
     expect(res.status).toBe(429);
   });
@@ -157,86 +157,52 @@ describe("auth", () => {
     expect((await attempt(c)).status).toBe(429);
   });
 
-  it("merchant settings: automatic matching by amount is off by default and can be switched", async () => {
-    const m = await signup(t);
-    expect((await m.agent.get("/auth/me")).body.merchant.autoMatchByAmount).toBe(false);
-    const on = await m.agent.post("/auth/settings").set("Origin", ORIGIN).send({ autoMatchByAmount: true });
-    expect(on.status).toBe(200);
-    expect(on.body.merchant.autoMatchByAmount).toBe(true);
-    expect((await m.agent.post("/auth/settings").set("Origin", ORIGIN).send({ autoMatchByAmount: "yes" })).status).toBe(400);
-    expect((await m.agent.post("/auth/settings").set("Origin", ORIGIN).send({})).status).toBe(400);
-    expect((await m.agent.post("/auth/settings").set("Origin", ORIGIN).send({ email: "new@x.example" })).status).toBe(400);
-    expect((await m.agent.post("/auth/settings").send({ autoMatchByAmount: false })).status).toBe(403);
-    expect((await anon().post("/auth/settings").set("Origin", ORIGIN).send({ autoMatchByAmount: false })).status).toBe(401);
-  });
-
-  it("merchant settings: business name, support contact and request defaults", async () => {
-    const { merchant, wallet } = await setupMerchant(t, "Old Name");
-    const save = (body: object) => merchant.agent.post("/auth/settings").set("Origin", ORIGIN).send(body);
-    const res = await save({ businessName: "  Ada's Kitchen ", supportContact: "+234 801 234 5678", defaultExpiryMinutes: 60, defaultWalletId: wallet.id });
-    expect(res.status).toBe(200);
-    expect(res.body.merchant).toMatchObject({ businessName: "Ada's Kitchen", supportContact: "+234 801 234 5678", defaultExpiryMinutes: 60, defaultWalletId: wallet.id, autoMatchByAmount: false });
-    // The checkout shows the new name and how to reach the business.
-    const req = await createRequest(merchant, wallet);
-    const checkout = await anon().get(`/public/pay/${req.publicId}`);
-    expect(checkout.body).toMatchObject({ businessName: "Ada's Kitchen", supportContact: "+234 801 234 5678" });
-    expect((await save({ supportContact: null })).body.merchant.supportContact).toBeNull();
-
-    for (const bad of [{ businessName: "" }, { defaultExpiryMinutes: 4 }, { defaultExpiryMinutes: 43_201 }, { supportContact: "x".repeat(101) }, { defaultWalletId: "../x" }]) {
-      expect((await save(bad)).status, JSON.stringify(bad)).toBe(400);
-    }
-    // The default wallet must be one of the merchant's own, live wallets.
-    const other = await setupMerchant(t, "Other");
-    expect((await save({ defaultWalletId: other.wallet.id })).status).toBe(404);
-    // Removing the default wallet clears the default.
-    await merchant.agent.delete(`/v1/wallets/${wallet.id}`).set("Origin", ORIGIN);
-    expect((await merchant.agent.get("/auth/me")).body.merchant.defaultWalletId).toBeNull();
-    expect((await save({ defaultWalletId: wallet.id })).status).toBe(404);
-  });
-
-  it("merchant settings: pay page, notifications and defaults", async () => {
-    const m = await signup(t);
-    const me = (await m.agent.get("/auth/me")).body.merchant;
-    expect(me).toMatchObject({ brandColor: "#1E4FD6", defaultAsset: "USDC", acceptedAssets: "BOTH", toleranceBps: 0, notifyPaid: true, notifyProblems: true, defaultExpiryMinutes: 15, website: null });
+  it("company settings: name and notification emails; unknown fields and empty bodies are refused", async () => {
+    const m = await signup(t, "Old Name");
+    expect((await m.agent.get("/auth/me")).body.company).toMatchObject({ businessName: "Old Name", notifyPaid: true, notifyProblems: true });
     const save = (body: object) => m.agent.post("/auth/settings").set("Origin", ORIGIN).send(body);
-    const res = await save({ website: "https://lumistore.example", brandColor: "#0F766E", defaultAsset: "XLM", acceptedAssets: "XLM", notifyPaid: false, supportContact: "help@lumistore.example" });
-    expect(res.body.merchant).toMatchObject({ website: "https://lumistore.example", brandColor: "#0F766E", defaultAsset: "XLM", acceptedAssets: "XLM", notifyPaid: false, supportContact: "help@lumistore.example" });
-    for (const bad of [{ brandColor: "blue" }, { brandColor: "#12345" }, { website: "javascript:alert(1)" }, { website: "lumistore" }, { acceptedAssets: "BTC" }, { defaultAsset: "BTC" }, { notifyPaid: "yes" }]) {
+    const res = await save({ businessName: "  Ada's Kitchen ", notifyPaid: false });
+    expect(res.status).toBe(200);
+    expect(res.body.company).toMatchObject({ businessName: "Ada's Kitchen", notifyPaid: false, notifyProblems: true });
+    for (const bad of [{}, { businessName: "" }, { notifyPaid: "yes" }, { email: "new@x.example" }, { brandColor: "#000000" }]) {
       expect((await save(bad)).status, JSON.stringify(bad)).toBe(400);
     }
-    expect((await save({ website: null })).body.merchant.website).toBeNull();
+    expect((await m.agent.post("/auth/settings").send({ notifyPaid: true })).status).toBe(403);
+    expect((await anon().post("/auth/settings").set("Origin", ORIGIN).send({ notifyPaid: true })).status).toBe(401);
   });
 
-  it("closing the account closes open requests, signs out everywhere, revokes keys and frees the email", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const pending = await createRequest(merchant, wallet);
-    const part = await createRequest(merchant, wallet);
-    const paid = await createRequest(merchant, wallet);
-    const e = makeEngine();
-    await e.ingestion.tick();
-    await e.pay([{ to: wallet.address, amountStroops: USDC(10), memoRaw: part.memo }, { to: wallet.address, amountStroops: USDC(50), memoRaw: paid.memo }]);
-    const key = (await merchant.agent.post("/v1/api-keys").set("Origin", ORIGIN).send({ name: "k" })).body.key as string;
+  it("closing the account needs the password, cancels drafts and unsent payments, signs out everywhere, revokes keys and frees the email", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 2);
+    const draft = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
+    const paying = await createRun(company, wallet, { employeeIds: people.map((p) => p.id) });
+    expect((await post(company, `/v1/payroll-runs/${paying.id}/start`)).status).toBe(200);
+    const key = (await post(company, "/v1/api-keys", { name: "k" })).body.key as string;
 
-    const close = (body: object) => merchant.agent.post("/auth/close").set("Origin", ORIGIN).send(body);
-    expect((await close({ confirm: "close" })).status).toBe(400);
-    expect((await close({})).status).toBe(400);
-    expect((await merchant.agent.post("/auth/close").send({ confirm: "CLOSE" })).status).toBe(403); // CSRF guard
-    expect((await close({ confirm: "CLOSE" })).status).toBe(204);
+    const close = (body: object) => company.agent.post("/auth/close").set("Origin", ORIGIN).send(body);
+    expect((await close({ password: company.password, confirm: "close" })).status).toBe(400);
+    expect((await close({ confirm: "CLOSE" })).status).toBe(400);
+    expect((await close({ password: "wrong password!", confirm: "CLOSE" })).status).toBe(401);
+    expect((await company.agent.post("/auth/close").send({ password: company.password, confirm: "CLOSE" })).status).toBe(403); // CSRF guard
 
-    const status = async (id: string) => (await prisma.paymentRequest.findUniqueOrThrow({ where: { id } })).status;
-    expect([await status(pending.id), await status(part.id), await status(paid.id)]).toEqual(["CANCELLED", "EXPIRED", "PAID"]);
-    expect((await merchant.agent.get("/auth/me")).status).toBe(401);
-    expect((await anon().get("/v1/payment-requests").set("Authorization", `Bearer ${key}`)).status).toBe(401);
-    expect((await anon().post("/auth/login").set("Origin", ORIGIN).send({ email: merchant.email, password: merchant.password })).status).toBe(401);
-    // The pay page of a closed request says so; the address and the email can be used again.
-    expect((await anon().get(`/public/pay/${pending.publicId}`)).body.status).toBe("CANCELLED");
-    await e.watched.refresh();
-    expect(e.watched.has(wallet.address)).toBe(false);
-    const again = await anon().post("/auth/signup").set("Origin", ORIGIN).send({ email: merchant.email, password: "a brand new password", businessName: "Again" });
+    // A batch waiting for a signature blocks closing: it could still be signed and land.
+    await nextBatch(company, paying.id);
+    expect((await close({ password: company.password, confirm: "CLOSE" })).body.error.code).toBe("RUN_LOCKED");
+    await prisma.payrollItem.updateMany({ where: { runId: paying.id }, data: { batchId: null } });
+    await prisma.payrollBatch.deleteMany({ where: { runId: paying.id } });
+    await prisma.$executeRaw`UPDATE "PayrollItem" SET status = 'PENDING' WHERE "runId" = ${paying.id}`;
+
+    expect((await close({ password: company.password, confirm: "CLOSE" })).status).toBe(204);
+    const status = async (id: string) => (await prisma.payrollRun.findUniqueOrThrow({ where: { id } })).status;
+    expect([await status(draft.id), await status(paying.id)]).toEqual(["CANCELLED", "CANCELLED"]);
+    expect(await prisma.payrollItem.count({ where: { runId: paying.id, status: "CANCELLED" } })).toBe(2);
+    expect((await company.agent.get("/auth/me")).status).toBe(401);
+    expect((await anon().get("/v1/employees").set("Authorization", `Bearer ${key}`)).status).toBe(401);
+    expect((await anon().post("/auth/login").set("Origin", ORIGIN).send({ email: company.email, password: company.password })).status).toBe(401);
+    const again = await anon().post("/auth/signup").set("Origin", ORIGIN).send({ email: company.email, password: "a brand new password", businessName: "Again" });
     expect(again.status).toBe(201);
-    // A late payment to the closed account's request is still recorded truthfully.
+    // The funding wallet is free for another company to add.
     const other = await signup(t);
-    expect((await other.agent.post("/v1/wallets").set("Origin", ORIGIN).send({ address: wallet.address, label: "x" })).status).toBe(201);
+    expect((await addFundingWallet(t, other, "10", wallet.keypair)).address).toBe(wallet.address);
   });
 
   it("'keep me logged in' unticked gives a browser-session cookie and a one-day session", async () => {
@@ -279,7 +245,7 @@ describe("auth", () => {
     expect((await m.agent.delete("/auth/sessions/not-a-session").set("Origin", ORIGIN)).status).toBe(400);
     expect((await m.agent.delete(`/auth/sessions/${others[1]!.id}`)).status).toBe(403); // CSRF guard
 
-    // Another merchant cannot see or end these sessions.
+    // Another company cannot see or end these sessions.
     const stranger = await signup(t);
     expect((await stranger.agent.get("/auth/sessions")).body.data).toHaveLength(1);
     expect((await stranger.agent.delete(`/auth/sessions/${others[1]!.id}`).set("Origin", ORIGIN)).status).toBe(404);
@@ -381,13 +347,13 @@ describe("auth", () => {
     expect(await prisma.apiKey.count()).toBe(1);
   });
 
-  it("CORS allows credentials only for the web origin; public routes are open without credentials", async () => {
-    const pre = await anon().options("/v1/payment-requests").set("Origin", ORIGIN).set("Access-Control-Request-Method", "POST");
+  it("CORS allows credentials only for the web origin; health is open without credentials", async () => {
+    const pre = await anon().options("/v1/employees").set("Origin", ORIGIN).set("Access-Control-Request-Method", "POST");
     expect(pre.headers["access-control-allow-origin"]).toBe(ORIGIN);
     expect(pre.headers["access-control-allow-credentials"]).toBe("true");
-    const evil = await anon().options("/v1/payment-requests").set("Origin", "https://evil.example").set("Access-Control-Request-Method", "POST");
+    const evil = await anon().options("/v1/employees").set("Origin", "https://evil.example").set("Access-Control-Request-Method", "POST");
     expect(evil.headers["access-control-allow-origin"]).not.toBe("https://evil.example");
-    const pub = await anon().get("/public/pay/aaaaaaaaaaaa").set("Origin", "https://anything.example");
+    const pub = await anon().get("/health").set("Origin", "https://anything.example");
     expect(pub.headers["access-control-allow-origin"]).toBe("*");
     expect(pub.headers["access-control-allow-credentials"]).toBeUndefined();
   });
@@ -406,7 +372,7 @@ describe("email confirmation at sign-up", () => {
     const app = strict();
     const m = await open(app);
     expect(m.res.status).toBe(201);
-    expect(m.res.body.merchant.emailVerified).toBe(false);
+    expect(m.res.body.company.emailVerified).toBe(false);
     const mail = app.mailer.sent.at(-1)!;
     expect(mail.to).toBe(m.email);
     expect(mail.subject).toMatch(/^\d{6} is your PayBridge code$/);
@@ -417,8 +383,8 @@ describe("email confirmation at sign-up", () => {
     expect(JSON.stringify(row)).not.toContain(code);
 
     // Signed in, but nothing under /v1 works yet.
-    expect((await m.agent.get("/auth/me")).body.merchant.emailVerified).toBe(false);
-    for (const path of ["/v1/wallets", "/v1/payment-requests", "/v1/api-keys", "/v1/summary?from=2026-01-01T00:00:00Z"]) {
+    expect((await m.agent.get("/auth/me")).body.company.emailVerified).toBe(false);
+    for (const path of ["/v1/wallets", "/v1/employees", "/v1/payroll-runs", "/v1/api-keys", "/v1/summary"]) {
       const blocked = await m.agent.get(path);
       expect(blocked.status, path).toBe(403);
       expect(blocked.body.error.code).toBe("EMAIL_NOT_VERIFIED");
@@ -428,7 +394,7 @@ describe("email confirmation at sign-up", () => {
     for (const bad of ["12345", "1234567", "abcdef", ""]) expect((await m.post("/auth/email/verify", { code: bad })).status, bad).toBe(400);
     const ok = await m.post("/auth/email/verify", { code: ` ${code.slice(0, 3)} ${code.slice(3)} ` }); // typed with a space
     expect(ok.status).toBe(200);
-    expect(ok.body.merchant.emailVerified).toBe(true);
+    expect(ok.body.company.emailVerified).toBe(true);
     expect((await m.agent.get("/v1/wallets")).status).toBe(200);
     expect(await prisma.emailVerification.count()).toBe(0);
     // Confirming again is harmless; asking for another code sends nothing.
@@ -451,7 +417,7 @@ describe("email confirmation at sign-up", () => {
     const dead = await m.post("/auth/email/verify", { code });
     expect(dead.status).toBe(400);
     expect(dead.body.error.code).toBe("CHALLENGE_EXPIRED");
-    expect((await m.agent.get("/auth/me")).body.merchant.emailVerified).toBe(false);
+    expect((await m.agent.get("/auth/me")).body.company.emailVerified).toBe(false);
 
     // A new code can be asked for once a minute.
     const tooSoon = await m.post("/auth/email/resend");
@@ -460,7 +426,7 @@ describe("email confirmation at sign-up", () => {
     await prisma.emailVerification.updateMany({ data: { sentAt: new Date(Date.now() - 61_000) } });
     expect((await m.post("/auth/email/resend")).status).toBe(204);
     const fresh = codeIn(app.mailer.sent.at(-1)!.text);
-    expect((await m.post("/auth/email/verify", { code: fresh })).body.merchant.emailVerified).toBe(true);
+    expect((await m.post("/auth/email/verify", { code: fresh })).body.company.emailVerified).toBe(true);
   });
 
   it("a code expires after 15 minutes, is tied to its own account, and parallel guesses cannot beat the limit", async () => {
@@ -475,9 +441,9 @@ describe("email confirmation at sign-up", () => {
     const wrong = codeA === "999999" ? "888888" : "999999";
     const burst = await Promise.all(Array.from({ length: 10 }, () => a.post("/auth/email/verify", { code: wrong })));
     expect(burst.filter((r) => r.body.error.code === "INVALID_CODE").length).toBeLessThanOrEqual(5);
-    expect((await prisma.emailVerification.findUniqueOrThrow({ where: { merchantId: a.res.body.merchant.id } })).attempts).toBe(5);
+    expect((await prisma.emailVerification.findUniqueOrThrow({ where: { companyId: a.res.body.company.id } })).attempts).toBe(5);
     // Expiry.
-    await prisma.emailVerification.updateMany({ where: { merchantId: b.res.body.merchant.id }, data: { expiresAt: new Date(Date.now() - 1000), attempts: 0 } });
+    await prisma.emailVerification.updateMany({ where: { companyId: b.res.body.company.id }, data: { expiresAt: new Date(Date.now() - 1000), attempts: 0 } });
     expect((await b.post("/auth/email/verify", { code: codeB })).body.error.code).toBe("CHALLENGE_EXPIRED");
     // Both endpoints need a session and the CSRF origin.
     expect((await anon().post("/auth/email/verify").set("Origin", ORIGIN).send({ code: "123456" })).status).toBe(401);
@@ -489,26 +455,26 @@ describe("email confirmation at sign-up", () => {
     const app = makeApp({}, { verifyEmail: true, mailer: failing });
     const m = await open(app);
     expect(m.res.status).toBe(201);
-    expect(m.res.body.merchant.emailVerified).toBe(false);
+    expect(m.res.body.company.emailVerified).toBe(false);
     const again = request.agent(app.app);
     const login = await again.post("/auth/login").set("Origin", ORIGIN).send({ email: m.email, password: "correct horse battery" });
-    expect(login.body.merchant.emailVerified).toBe(false);
+    expect(login.body.company.emailVerified).toBe(false);
     expect((await again.get("/v1/wallets")).status).toBe(403);
   });
 
   it("without a mail server there is nothing to confirm: accounts are usable straight away", async () => {
     const res = await anon().post("/auth/signup").set("Origin", ORIGIN).send({ ...creds, email: "plain@shop.example" });
-    expect(res.body.merchant.emailVerified).toBe(true);
+    expect(res.body.company.emailVerified).toBe(true);
     const noMail = makeApp({}, { verifyEmail: true, mailer: null });
     const res2 = await request(noMail.app).post("/auth/signup").set("Origin", ORIGIN).send({ ...creds, email: "nomail@shop.example" });
-    expect(res2.body.merchant.emailVerified).toBe(true);
+    expect(res2.body.company.emailVerified).toBe(true);
   });
 });
 
 describe("API keys", () => {
   it("shows the full key once, stores only its hash, authenticates with Bearer, and can be revoked", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const created = await merchant.agent.post("/v1/api-keys").set("Origin", ORIGIN).send({ name: "Storefront" });
+    const { company, wallet, people } = await setupPayroll(t, 1);
+    const created = await company.agent.post("/v1/api-keys").set("Origin", ORIGIN).send({ name: "Storefront" });
     expect(created.status).toBe(201);
     const key = created.body.key as string;
     expect(key).toMatch(/^pb_test_[A-Za-z0-9]{43}$/);
@@ -516,281 +482,140 @@ describe("API keys", () => {
     const row = await prisma.apiKey.findFirstOrThrow();
     expect(row.keyHash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(row)).not.toContain(key);
-    const list = await merchant.agent.get("/v1/api-keys");
+    const list = await company.agent.get("/v1/api-keys");
     expect(JSON.stringify(list.body)).not.toContain(key);
 
     // API-key requests need no Origin and are attributed to "api".
-    const viaKey = await anon().post("/v1/payment-requests").set("Authorization", `Bearer ${key}`).send({ walletId: wallet.id, amount: "5", asset: "XLM" });
+    const viaKey = await anon().post("/v1/payroll-runs").set("Authorization", `Bearer ${key}`).send({ name: "Via API", walletId: wallet.id, employeeIds: [people[0]?.id] });
     expect(viaKey.status).toBe(201);
-    expect(viaKey.body.request.createdVia).toBe("api");
+    expect((await prisma.payrollRun.findUniqueOrThrow({ where: { id: viaKey.body.run.id } })).createdVia).toBe("api");
     expect((await prisma.apiKey.findFirstOrThrow()).lastUsedAt).not.toBeNull();
-    const cancel = await anon().post(`/v1/payment-requests/${viaKey.body.request.id}/cancel`).set("Authorization", `Bearer ${key}`);
+    const cancel = await anon().post(`/v1/payroll-runs/${viaKey.body.run.id}/cancel`).set("Authorization", `Bearer ${key}`);
     expect(cancel.status).toBe(200);
-    expect((await prisma.requestEvent.findFirstOrThrow()).actor).toBe("api");
+    expect((await prisma.payrollEvent.findFirstOrThrow({ where: { type: "cancelled" } })).actor).toBe("api");
 
     // Wallet and key management and the dashboard stream are session-only.
-    for (const path of ["/v1/wallets", "/v1/api-keys", "/v1/stream"]) {
+    for (const path of ["/v1/wallets", "/v1/api-keys"]) {
       expect((await anon().get(path).set("Authorization", `Bearer ${key}`)).status, path).toBe(401);
     }
     expect((await anon().get("/auth/me").set("Authorization", `Bearer ${key}`)).status).toBe(401);
 
-    const revoke = await merchant.agent.delete(`/v1/api-keys/${created.body.apiKey.id}`).set("Origin", ORIGIN);
+    const revoke = await company.agent.delete(`/v1/api-keys/${created.body.apiKey.id}`).set("Origin", ORIGIN);
     expect(revoke.status).toBe(204);
-    expect((await anon().get("/v1/payment-requests").set("Authorization", `Bearer ${key}`)).status).toBe(401);
-    expect((await merchant.agent.delete(`/v1/api-keys/${created.body.apiKey.id}`).set("Origin", ORIGIN)).status).toBe(204);
+    expect((await anon().get("/v1/employees").set("Authorization", `Bearer ${key}`)).status).toBe(401);
+    expect((await company.agent.delete(`/v1/api-keys/${created.body.apiKey.id}`).set("Origin", ORIGIN)).status).toBe(204);
   });
 
   it("rejects missing, malformed and unknown credentials with 401 UNAUTHENTICATED", async () => {
     const m = await signup(t);
     for (const header of ["Bearer pb_test_doesnotexist", "Bearer ", "Basic abc", "pb_test_x", `Bearer ${"x".repeat(500)}`]) {
-      const res = await anon().get("/v1/payment-requests").set("Authorization", header);
+      const res = await anon().get("/v1/employees").set("Authorization", header);
       expect(res.status, header).toBe(401);
       expect(res.body.error.code).toBe("UNAUTHENTICATED");
     }
-    expect((await anon().get("/v1/payment-requests")).status).toBe(401);
-    expect((await anon().get("/v1/payment-requests").set("Cookie", "pb_session=forged")).status).toBe(401);
+    expect((await anon().get("/v1/employees")).status).toBe(401);
+    expect((await anon().get("/v1/employees").set("Cookie", "pb_session=forged")).status).toBe(401);
     // A bad Authorization header is never rescued by a valid cookie.
-    expect((await m.agent.get("/v1/payment-requests").set("Authorization", "Bearer pb_test_bad")).status).toBe(401);
-  });
-});
-
-describe("listing", () => {
-  it("paginates requests with an opaque cursor and filters by status, wallet, date and q", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const second = await addVerifiedWallet(merchant);
-    const made = [];
-    for (let i = 0; i < 5; i++) made.push(await createRequest(merchant, i === 4 ? second : wallet, { customerRef: `order-${i}` }));
-    const e = makeEngine();
-    await e.ingestion.tick();
-    await e.pay({ to: wallet.address, amountStroops: USDC(50), memoRaw: made[0]!.memo });
-
-    const page1 = await merchant.agent.get("/v1/payment-requests?limit=2");
-    expect(page1.body.data.map((r: { id: string }) => r.id)).toEqual([made[4]!.id, made[3]!.id]);
-    expect(page1.body.nextCursor).toEqual(expect.any(String));
-    const page2 = await merchant.agent.get(`/v1/payment-requests?limit=2&cursor=${page1.body.nextCursor}`);
-    const page3 = await merchant.agent.get(`/v1/payment-requests?limit=2&cursor=${page2.body.nextCursor}`);
-    expect(page2.body.data.map((r: { id: string }) => r.id)).toEqual([made[2]!.id, made[1]!.id]);
-    expect(page3.body.data.map((r: { id: string }) => r.id)).toEqual([made[0]!.id]);
-    expect(page3.body.nextCursor).toBeNull();
-
-    expect((await merchant.agent.get("/v1/payment-requests?status=PAID")).body.data).toMatchObject([{ id: made[0]!.id }]);
-    expect((await merchant.agent.get(`/v1/payment-requests?walletId=${second.id}`)).body.data).toMatchObject([{ id: made[4]!.id }]);
-    expect((await merchant.agent.get("/v1/payment-requests?q=ORDER-3")).body.data).toMatchObject([{ id: made[3]!.id }]);
-    expect((await merchant.agent.get(`/v1/payment-requests?q=${made[2]!.memo.toLowerCase()}`)).body.data).toMatchObject([{ id: made[2]!.id }]);
-    const future = new Date(Date.now() + 60_000).toISOString();
-    expect((await merchant.agent.get(`/v1/payment-requests?from=${encodeURIComponent(future)}`)).body.data).toEqual([]);
-    expect((await merchant.agent.get(`/v1/payment-requests?to=${encodeURIComponent(future)}`)).body.data).toHaveLength(5);
-
-    for (const bad of ["limit=0", "limit=101", "limit=abc", "status=DONE", "cursor=garbage", "from=yesterday", "sort=asc", "limit=1&limit=2"]) {
-      const res = await merchant.agent.get(`/v1/payment-requests?${bad}`);
-      expect(res.status, bad).toBe(400);
-      expect(res.body.error.code).toBe("VALIDATION_FAILED");
-    }
-  });
-
-  it("request stats count per status under the list's filters; search also matches the description", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const a = await createRequest(merchant, wallet, { description: "Party jollof tray", customerRef: "ord-1" });
-    await createRequest(merchant, wallet, { description: "Zobo, 6 bottles", customerRef: "ord-2" });
-    const c = await createRequest(merchant, wallet, { description: "Jollof rice for four" });
-    await merchant.agent.post(`/v1/payment-requests/${c.id}/cancel`).set("Origin", ORIGIN);
-    const e = makeEngine();
-    await e.ingestion.tick();
-    await e.pay({ to: wallet.address, amountStroops: USDC(50), memoRaw: a.memo });
-
-    const all = await merchant.agent.get("/v1/payment-requests/stats");
-    expect(all.status).toBe(200);
-    expect(all.body).toEqual({ total: 3, byStatus: { PENDING: 1, UNDERPAID: 0, PAID: 1, OVERPAID: 0, EXPIRED: 0, CANCELLED: 1, NETWORK_RESET: 0 } });
-    const jollof = await merchant.agent.get("/v1/payment-requests/stats?q=jollof");
-    expect(jollof.body).toMatchObject({ total: 2, byStatus: { PAID: 1, CANCELLED: 1, PENDING: 0 } });
-    expect((await merchant.agent.get("/v1/payment-requests?q=JOLLOF")).body.data).toHaveLength(2);
-    const future = encodeURIComponent(new Date(Date.now() + 60_000).toISOString());
-    expect((await merchant.agent.get(`/v1/payment-requests/stats?from=${future}`)).body.total).toBe(0);
-    expect((await merchant.agent.get("/v1/payment-requests/stats?status=PAID")).status).toBe(400);
-    // Another merchant's requests are never counted.
-    const other = await setupMerchant(t, "Other");
-    expect((await other.merchant.agent.get("/v1/payment-requests/stats")).body.total).toBe(0);
-  });
-
-  it("summary: collected per asset, requests settled, open requests and what needs the merchant", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const e = makeEngine();
-    await e.ingestion.tick();
-    const from = encodeURIComponent(new Date(Date.now() - 3_600_000).toISOString());
-    const get = () => merchant.agent.get(`/v1/summary?from=${from}`);
-    expect((await get()).body).toMatchObject({ collected: [], requests: { created: 0, settled: 0 }, open: { count: 0, underpaid: 0, nextExpiresAt: null }, needsYou: { unmatched: 0, refunds: 0, refundRequests: [] } });
-
-    const paid = await createRequest(merchant, wallet);
-    const part = await createRequest(merchant, wallet, { amount: "120", expiresInMinutes: 10 });
-    await createRequest(merchant, wallet, { amount: "9" });
-    const xlm = await createRequest(merchant, wallet, { asset: "XLM", amount: "5" });
-    await e.pay([
-      { to: wallet.address, amountStroops: USDC(50), memoRaw: paid.memo },
-      { to: wallet.address, amountStroops: USDC(100), memoRaw: part.memo },
-      { to: wallet.address, amountStroops: 50_000_000n, memoRaw: xlm.memo, assetCode: "XLM", assetIssuer: null },
-      { to: wallet.address, amountStroops: USDC(15) }, // no memo
-      { to: wallet.address, amountStroops: USDC(50), memoRaw: paid.memo }, // duplicate: refund owed
-    ]);
-    const res = await get();
-    expect(res.status).toBe(200);
-    const byCode = Object.fromEntries(res.body.collected.map((c: { asset: { code: string }; amount: string; payments: number }) => [c.asset.code, [c.amount, c.payments]]));
-    expect(byCode).toEqual({ USDC: ["150.0000000", 2], XLM: ["5.0000000", 1] });
-    expect(res.body.requests).toEqual({ created: 4, settled: 2 });
-    expect(res.body.open).toMatchObject({ count: 2, underpaid: 1 });
-    expect(new Date(res.body.open.nextExpiresAt).getTime()).toBeLessThan(Date.now() + 11 * 60_000);
-    expect(res.body.needsYou).toMatchObject({ unmatched: 1, refunds: 1 });
-    expect(res.body.needsYou.refundRequests).toMatchObject([{ id: paid.id, refundOwed: true }]);
-
-    // Payments before `from` are not counted as collected.
-    const later = encodeURIComponent(new Date(Date.now() + 60_000).toISOString());
-    expect((await merchant.agent.get(`/v1/summary?from=${later}`)).body).toMatchObject({ collected: [], requests: { created: 0, settled: 0 } });
-    expect((await merchant.agent.get("/v1/summary")).status).toBe(400);
-    const other = await setupMerchant(t, "Other");
-    expect((await other.merchant.agent.get(`/v1/summary?from=${from}`)).body).toMatchObject({ collected: [], needsYou: { unmatched: 0, refunds: 0 } });
-  });
-
-  it("payments can be listed for a day by ledger close time", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const day = 24 * 3_600_000;
-    // The wallet has been with PayBridge for a while; payments from before it was added are not recorded.
-    await prisma.wallet.update({ where: { id: wallet.id }, data: { createdAt: new Date(Date.now() - 3 * day) } });
-    const e = makeEngine();
-    await e.ingestion.tick();
-    await e.pay({ to: wallet.address, amountStroops: USDC(1) }, new Date(Date.now() - day - 3_600_000)); // yesterday
-    await e.pay({ to: wallet.address, amountStroops: USDC(2) }, new Date(Date.now() - 60_000)); // today
-    const iso = (ms: number) => encodeURIComponent(new Date(ms).toISOString());
-    const today = await merchant.agent.get(`/v1/payments?from=${iso(Date.now() - day / 2)}`);
-    expect(today.body.data).toMatchObject([{ amount: "2.0000000" }]);
-    const yesterday = await merchant.agent.get(`/v1/payments?from=${iso(Date.now() - 2 * day)}&to=${iso(Date.now() - day / 2)}`);
-    expect(yesterday.body.data).toMatchObject([{ amount: "1.0000000" }]);
-    expect((await merchant.agent.get("/v1/payments?from=today")).status).toBe(400);
-  });
-
-  it("lists payments with outcome, wallet and unmatched filters, newest first", async () => {
-    const { merchant, wallet } = await setupMerchant(t);
-    const req = await createRequest(merchant, wallet);
-    const e = makeEngine();
-    await e.ingestion.tick();
-    await e.pay({ to: wallet.address, amountStroops: USDC(50), memoRaw: req.memo });
-    await e.pay({ to: wallet.address, amountStroops: USDC(1) });
-    await e.pay({ to: wallet.address, amountStroops: USDC(2), memoRaw: req.memo });
-    const all = await merchant.agent.get("/v1/payments");
-    expect(all.body.data.map((p: { outcome: string }) => p.outcome)).toEqual(["DUPLICATE", "NO_MEMO", "COUNTED"]);
-    expect(all.body.data[0]).toMatchObject({ amount: "2.0000000", amountStroops: "20000000", requestId: req.id });
-    expect((await merchant.agent.get("/v1/payments?outcome=COUNTED")).body.data).toHaveLength(1);
-    expect((await merchant.agent.get("/v1/payments?unmatched=true")).body.data).toHaveLength(1);
-    expect((await merchant.agent.get(`/v1/payments?walletId=${wallet.id}&limit=2`)).body.nextCursor).toEqual(expect.any(String));
-    expect((await merchant.agent.get("/v1/payments?outcome=NOPE")).status).toBe(400);
+    expect((await m.agent.get("/v1/employees").set("Authorization", "Bearer pb_test_bad")).status).toBe(401);
   });
 });
 
 describe("tenant isolation", () => {
-  // One check per /v1 route: merchant A gets 404 for merchant B's ids, and B's data is untouched.
-  async function world() {
-    const a = await setupMerchant(t, "A");
-    const b = await setupMerchant(t, "B");
-    const bRequest = await createRequest(b.merchant, b.wallet);
-    const bKey = await b.merchant.agent.post("/v1/api-keys").set("Origin", ORIGIN).send({ name: "b" });
-    const e = makeEngine();
-    await e.ingestion.tick();
-    const [bPayment] = await e.pay({ to: b.wallet.address, amountStroops: USDC(5) });
-    const aRequest = await createRequest(a.merchant, a.wallet);
-    const [aPayment] = await e.pay({ to: a.wallet.address, amountStroops: USDC(5) });
-    return { a, b, bRequest, bKeyId: bKey.body.apiKey.id as string, bPayment: bPayment!, aRequest, aPayment: aPayment! };
-  }
-  const expect404 = (res: request.Response) => {
+  const expect404 = (res: { status: number; body: { error?: { code: string } } }) => {
     expect(res.status).toBe(404);
-    expect(res.body.error.code).toBe("NOT_FOUND");
+    expect(res.body.error?.code).toBe("NOT_FOUND");
   };
 
-  it("GET /v1/payment-requests/:id", async () => {
+  /** Two companies; B has a group, a person, a draft run and a run being paid. */
+  async function world() {
+    const a = await setupPayroll(t, 1);
+    const b = await setupPayroll(t, 2);
+    const bGroup = (await post(b.company, "/v1/groups", { name: "Engineering" })).body.group as { id: string };
+    const bDraft = await createRun(b.company, b.wallet, { employeeIds: [b.people[0]?.id] });
+    const bPaying = await createRun(b.company, b.wallet, { employeeIds: b.people.map((p) => p.id) });
+    await post(b.company, `/v1/payroll-runs/${bPaying.id}/start`);
+    const { batch } = await nextBatch(b.company, bPaying.id);
+    const bKeyId = (await post(b.company, "/v1/api-keys", { name: "b" })).body.apiKey.id as string;
+    return { a, b, bGroup, bDraft, bPaying, bBatchId: batch?.id ?? "", bKeyId, bItemId: bDraft.items[0]?.id ?? "" };
+  }
+
+  it("people and groups: lists show only the caller's; every id route is 404", async () => {
     const w = await world();
-    expect404(await w.a.merchant.agent.get(`/v1/payment-requests/${w.bRequest.id}`));
+    const ac = w.a.company;
+    expect((await ac.agent.get("/v1/employees")).body.data.map((e: { id: string }) => e.id)).toEqual([w.a.people[0]?.id]);
+    expect((await ac.agent.get("/v1/groups")).body.data).toEqual([]);
+    expect((await ac.agent.get(`/v1/employees?groupId=${w.bGroup.id}`)).body.data).toEqual([]);
+    const bPerson = w.b.people[0]?.id;
+    expect404(await ac.agent.get(`/v1/employees/${bPerson}`));
+    expect404(await ac.agent.patch(`/v1/employees/${bPerson}`).set("Origin", ORIGIN).send({ name: "Hijacked" }));
+    expect404(await post(ac, `/v1/employees/${bPerson}/archive`));
+    expect404(await post(ac, `/v1/employees/${bPerson}/restore`));
+    expect404(await ac.agent.patch(`/v1/groups/${w.bGroup.id}`).set("Origin", ORIGIN).send({ name: "Mine" }));
+    expect404(await ac.agent.delete(`/v1/groups/${w.bGroup.id}`).set("Origin", ORIGIN));
+    // Using B's group or person as one's own is refused too.
+    expect404(await post(ac, "/v1/employees", { name: "X", walletAddress: w.b.wallet.address, defaultAmount: "1", groupId: w.bGroup.id }));
+    expect((await post(ac, "/v1/employees/check", { ids: [bPerson] })).body.data).toEqual([]);
+    expect((await prisma.employee.findUniqueOrThrow({ where: { id: bPerson } })).name).not.toBe("Hijacked");
   });
-  it("GET /v1/payment-requests lists only the caller's requests", async () => {
+
+  it("payroll runs: lists show only the caller's; every id route is 404 and changes nothing", async () => {
     const w = await world();
-    const list = await w.a.merchant.agent.get("/v1/payment-requests");
-    expect(list.body.data.map((r: { id: string }) => r.id)).toEqual([w.aRequest.id]);
-    expect((await w.a.merchant.agent.get(`/v1/payment-requests?walletId=${w.b.wallet.id}`)).body.data).toEqual([]);
+    const ac = w.a.company;
+    expect((await ac.agent.get("/v1/payroll-runs")).body.data).toEqual([]);
+    for (const res of [
+      await ac.agent.get(`/v1/payroll-runs/${w.bDraft.id}`),
+      await ac.agent.get(`/v1/payroll-runs/${w.bDraft.id}/check`),
+      await ac.agent.patch(`/v1/payroll-runs/${w.bDraft.id}`).set("Origin", ORIGIN).send({ name: "Mine" }),
+      await post(ac, `/v1/payroll-runs/${w.bDraft.id}/items`, { employeeIds: [w.a.people[0]?.id] }),
+      await ac.agent.patch(`/v1/payroll-runs/${w.bDraft.id}/items/${w.bItemId}`).set("Origin", ORIGIN).send({ amount: "1" }),
+      await ac.agent.delete(`/v1/payroll-runs/${w.bDraft.id}/items/${w.bItemId}`).set("Origin", ORIGIN),
+      await post(ac, `/v1/payroll-runs/${w.bDraft.id}/start`),
+      await post(ac, `/v1/payroll-runs/${w.bPaying.id}/batches/next`),
+      await post(ac, `/v1/payroll-runs/${w.bPaying.id}/batches/${w.bBatchId}/submit`, { signedXdr: "AAAA" }),
+      await post(ac, `/v1/payroll-runs/${w.bPaying.id}/retry`),
+      await post(ac, `/v1/payroll-runs/${w.bDraft.id}/cancel`),
+      await ac.agent.delete(`/v1/payroll-runs/${w.bDraft.id}`).set("Origin", ORIGIN),
+    ]) {
+      expect404(res);
+    }
+    // A's run cannot pay from B's wallet or include B's people.
+    expect404(await post(ac, "/v1/payroll-runs", { name: "x", walletId: w.b.wallet.id }));
+    const aRun = await createRun(ac, w.a.wallet, { employeeIds: [w.a.people[0]?.id] });
+    expect((await post(ac, `/v1/payroll-runs/${aRun.id}/items`, { employeeIds: [w.b.people[0]?.id] })).status).toBe(400);
+    expect404(await post(ac, `/v1/payroll-runs/${aRun.id}/items`, { groupIds: [w.bGroup.id] }));
+    const draft = await prisma.payrollRun.findUniqueOrThrow({ where: { id: w.bDraft.id }, include: { items: true } });
+    expect(draft).toMatchObject({ status: "DRAFT", name: "October payroll" });
+    expect(draft.items).toHaveLength(1);
+    expect((await ac.agent.get("/v1/summary")).body).toMatchObject({ draftRuns: [{ id: aRun.id }], activeRuns: [], activeEmployees: 1 });
   });
-  it("POST /v1/payment-requests on another merchant's wallet", async () => {
+
+  it("wallets and API keys", async () => {
     const w = await world();
-    expect404(await w.a.merchant.agent.post("/v1/payment-requests").set("Origin", ORIGIN).send({ walletId: w.b.wallet.id, amount: "1", asset: "XLM" }));
-  });
-  it("POST /v1/payment-requests/:id/cancel", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/payment-requests/${w.bRequest.id}/cancel`).set("Origin", ORIGIN));
-    expect((await prisma.paymentRequest.findUniqueOrThrow({ where: { id: w.bRequest.id } })).status).toBe("PENDING");
-  });
-  it("POST /v1/payment-requests/:id/accept", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/payment-requests/${w.bRequest.id}/accept`).set("Origin", ORIGIN));
-  });
-  it("GET /v1/payments lists only payments to the caller's wallets", async () => {
-    const w = await world();
-    const list = await w.a.merchant.agent.get("/v1/payments");
-    expect(list.body.data.map((p: { eventId: string }) => p.eventId)).toEqual([w.aPayment.eventId]);
-    expect((await w.a.merchant.agent.get(`/v1/payments?walletId=${w.b.wallet.id}`)).body.data).toEqual([]);
-  });
-  it("POST /v1/payments/:eventId/assign with another merchant's payment or request", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/payments/${w.bPayment.eventId}/assign`).set("Origin", ORIGIN).send({ requestId: w.aRequest.id }));
-    expect404(await w.a.merchant.agent.post(`/v1/payments/${w.aPayment.eventId}/assign`).set("Origin", ORIGIN).send({ requestId: w.bRequest.id }));
-    expect((await prisma.chainPayment.findUniqueOrThrow({ where: { eventId: w.bPayment.eventId } })).requestId).toBeNull();
-  });
-  it("POST /v1/payments/:eventId/refunded and POST /v1/payment-requests/:id/refunded", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/payments/${w.bPayment.eventId}/refunded`).set("Origin", ORIGIN).send({}));
-    expect404(await w.a.merchant.agent.post(`/v1/payment-requests/${w.bRequest.id}/refunded`).set("Origin", ORIGIN).send({}));
-    expect((await prisma.chainPayment.findUniqueOrThrow({ where: { eventId: w.bPayment.eventId } })).refundedAt).toBeNull();
-  });
-  it("GET /v1/wallets lists only the caller's wallets", async () => {
-    const w = await world();
-    const list = await w.a.merchant.agent.get("/v1/wallets");
-    expect(list.body.data.map((x: { id: string }) => x.id)).toEqual([w.a.wallet.id]);
-  });
-  it("POST /v1/wallets/:id/refresh", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/wallets/${w.b.wallet.id}/refresh`).set("Origin", ORIGIN));
-  });
-  it("POST /v1/wallets/:id/challenge", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.post(`/v1/wallets/${w.b.wallet.id}/challenge`).set("Origin", ORIGIN));
-  });
-  it("POST /v1/wallets/:id/verify (even with a signature from the real owner's key)", async () => {
-    const w = await world();
-    const challenge = await w.b.merchant.agent.post(`/v1/wallets/${w.b.wallet.id}/challenge`).set("Origin", ORIGIN);
+    const ac = w.a.company;
+    expect((await ac.agent.get("/v1/wallets")).body.data.map((x: { id: string }) => x.id)).toEqual([w.a.wallet.id]);
+    expect404(await post(ac, `/v1/wallets/${w.b.wallet.id}/refresh`));
+    expect404(await post(ac, `/v1/wallets/${w.b.wallet.id}/challenge`));
+    const challenge = await post(w.b.company, `/v1/wallets/${w.b.wallet.id}/challenge`);
     const signature = Buffer.from(w.b.wallet.keypair.signMessage(challenge.body.message)).toString("base64");
-    expect404(await w.a.merchant.agent.post(`/v1/wallets/${w.b.wallet.id}/verify`).set("Origin", ORIGIN).send({ challengeId: challenge.body.challengeId, signature }));
-  });
-  it("DELETE /v1/wallets/:id", async () => {
-    const w = await world();
-    expect404(await w.a.merchant.agent.delete(`/v1/wallets/${w.b.wallet.id}`).set("Origin", ORIGIN));
+    expect404(await post(ac, `/v1/wallets/${w.b.wallet.id}/verify`, { challengeId: challenge.body.challengeId, signature }));
+    expect404(await ac.agent.delete(`/v1/wallets/${w.b.wallet.id}`).set("Origin", ORIGIN));
     expect((await prisma.wallet.findUniqueOrThrow({ where: { id: w.b.wallet.id } })).deletedAt).toBeNull();
-  });
-  it("GET /v1/api-keys lists only the caller's keys; DELETE /v1/api-keys/:id", async () => {
-    const w = await world();
-    expect((await w.a.merchant.agent.get("/v1/api-keys")).body.data).toEqual([]);
-    expect404(await w.a.merchant.agent.delete(`/v1/api-keys/${w.bKeyId}`).set("Origin", ORIGIN));
+    expect((await ac.agent.get("/v1/api-keys")).body.data).toEqual([]);
+    expect404(await ac.agent.delete(`/v1/api-keys/${w.bKeyId}`).set("Origin", ORIGIN));
     expect((await prisma.apiKey.findUniqueOrThrow({ where: { id: w.bKeyId } })).revokedAt).toBeNull();
   });
 });
 
 describe("platform", () => {
-  it("health reports DB status, last processed ledger, lag and open requests", async () => {
+  it("health reports DB status and open batches", async () => {
     const empty = await anon().get("/health");
     expect(empty.status).toBe(200);
-    expect(empty.body).toEqual({ status: "ok", db: "up", network: "testnet", lastProcessedLedger: null, lagSeconds: null, openRequests: 0 });
-    const { merchant, wallet } = await setupMerchant(t);
-    await createRequest(merchant, wallet);
-    const e = makeEngine();
-    await e.ingestion.tick();
-    e.source.closeLedger(new Date(Date.now() - 30_000));
-    await e.ingestion.tick();
-    const res = await anon().get("/health");
-    expect(res.body).toMatchObject({ lastProcessedLedger: 1001, openRequests: 1 });
-    expect(res.body.lagSeconds).toBeGreaterThanOrEqual(29);
-    expect(res.body.lagSeconds).toBeLessThan(40);
+    expect(empty.body).toEqual({ status: "ok", db: "up", network: "testnet", openBatches: 0 });
+    const { company, wallet, people } = await setupPayroll(t, 1);
+    const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    await nextBatch(company, run.id);
+    expect((await anon().get("/health")).body.openBatches).toBe(1);
   });
 
   it("every error uses the shared shape with a request id; unknown routes are NOT_FOUND", async () => {
@@ -818,26 +643,26 @@ describe("platform", () => {
     expect(spec.body.openapi).toBe("3.0.3");
     const paths = Object.keys(spec.body.paths);
     for (const path of [
-      "/v1/payment-requests", "/v1/payment-requests/stats", "/v1/payment-requests/{id}", "/v1/payment-requests/{id}/cancel", "/v1/payment-requests/{id}/accept", "/v1/payment-requests/{id}/refunded",
-      "/v1/payments", "/v1/payments/{eventId}/assign", "/v1/payments/{eventId}/refunded", "/v1/summary",
-      "/public/pay/{publicId}", "/public/pay/{publicId}/events", "/health",
+      "/v1/employees", "/v1/employees/{id}", "/v1/employees/import", "/v1/groups", "/v1/payroll-runs", "/v1/payroll-runs/{id}",
+      "/v1/payroll-runs/{id}/start", "/v1/payroll-runs/{id}/batches/next", "/v1/payroll-runs/{id}/batches/{batchId}/submit",
+      "/v1/payroll-runs/{id}/retry", "/v1/summary", "/health",
     ]) {
       expect(paths, path).toContain(path);
     }
     // The published reference is for API-key users: nothing that needs the dashboard session.
-    expect(paths.filter((p) => p.startsWith("/auth") || p.startsWith("/v1/api-keys") || p.startsWith("/v1/wallets") || p === "/v1/stream")).toEqual([]);
+    expect(paths.filter((p) => p.startsWith("/auth") || p.startsWith("/v1/api-keys") || p.startsWith("/v1/wallets"))).toEqual([]);
     expect(Object.keys(spec.body.components.securitySchemes)).toEqual(["apiKey"]);
     expect(JSON.stringify(spec.body)).not.toContain("pb_session");
     expect(spec.body.servers[0].url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    expect(spec.body.components.schemas.PaymentRequest.properties.amount).toEqual({ type: "string" });
+    expect(spec.body.components.schemas.PayrollRun.properties.total).toEqual({ type: "string" });
     const docs = await anon().get("/docs");
     expect(docs.status).toBe(200);
     expect(docs.headers["content-type"]).toMatch(/html/);
     expect(docs.text).toContain("/openapi.json");
   });
 
-  it("rate limits with 429 RATE_LIMITED and Retry-After: 5/min on credentials, per merchant on /v1, per IP on public", async () => {
-    const limited = makeApp({ authPerMin: 5, v1PerMin: 3, publicPerMin: 2 });
+  it("rate limits with 429 RATE_LIMITED and Retry-After: 5/min on credentials, per company on /v1", async () => {
+    const limited = makeApp({ authPerMin: 5, v1PerMin: 3 });
     let n = 0; // a fresh email each time, so only the per-IP limit is in play
     const login = () => request(limited.app).post("/auth/login").set("Origin", ORIGIN).send({ email: `x${n++}@y.example`, password: "whatever it is" });
     for (let i = 0; i < 5; i++) expect((await login()).status).toBe(401);
@@ -854,12 +679,19 @@ describe("platform", () => {
     };
     const cookieA = await cookieOf(a.email, a.password);
     const cookieB = await cookieOf(b.email, b.password);
-    for (let i = 0; i < 3; i++) expect((await request(limited.app).get("/v1/payment-requests").set("Cookie", cookieA)).status).toBe(200);
-    expect((await request(limited.app).get("/v1/payment-requests").set("Cookie", cookieA)).status).toBe(429);
-    // The limit is per merchant: B is unaffected by A's burst.
-    expect((await request(limited.app).get("/v1/payment-requests").set("Cookie", cookieB)).status).toBe(200);
+    for (let i = 0; i < 3; i++) expect((await request(limited.app).get("/v1/employees").set("Cookie", cookieA)).status).toBe(200);
+    expect((await request(limited.app).get("/v1/employees").set("Cookie", cookieA)).status).toBe(429);
+    // The limit is per company: B is unaffected by A's burst.
+    expect((await request(limited.app).get("/v1/employees").set("Cookie", cookieB)).status).toBe(200);
+  });
 
-    for (let i = 0; i < 2; i++) expect((await request(limited.app).get("/public/pay/aaaaaaaaaaaa")).status).toBe(404);
-    expect((await request(limited.app).get("/public/pay/aaaaaaaaaaaa")).status).toBe(429);
+  it("the 50 kb body limit holds everywhere except bulk import, which takes up to 200 kb", async () => {
+    const { company } = await setupPayroll(t, 0);
+    const big = { name: "x".repeat(60_000), walletAddress: "G", defaultAmount: "1" };
+    expect((await post(company, "/v1/employees", big)).status).toBe(413);
+    const rows = Array.from({ length: 400 }, (_, i) => ({ name: `Person ${i} ${"y".repeat(80)}`, walletAddress: "GBAD", defaultAmount: "1" }));
+    const res = await post(company, "/v1/employees/import", { employees: rows });
+    expect(res.status).toBe(400); // parsed (not 413), then refused row by row
+    expect(res.body.error.code).toBe("VALIDATION_FAILED");
   });
 });

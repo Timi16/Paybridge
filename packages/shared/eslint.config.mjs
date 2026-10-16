@@ -12,11 +12,6 @@ const MONEY_RULES = [
   },
 ];
 
-const STATUS_RULE = {
-  selector:
-    "CallExpression[callee.property.name=/^(update|updateMany|upsert)$/][callee.object.property.name='paymentRequest'] Property[key.name='data'] Property[key.name='status']",
-  message: "Only modules/transitions.ts may change PaymentRequest.status. Call transitionRequest().",
-};
 
 export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**", "openapi.json"] },
@@ -28,7 +23,7 @@ export default tseslint.config(
       "@typescript-eslint/ban-ts-comment": ["error", { "ts-ignore": "allow-with-description", "ts-expect-error": "allow-with-description" }],
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       "no-control-regex": "off",
-      "no-restricted-syntax": ["error", ...MONEY_RULES, STATUS_RULE],
+      "no-restricted-syntax": ["error", ...MONEY_RULES],
     },
   },
   {

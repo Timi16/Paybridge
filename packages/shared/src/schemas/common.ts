@@ -4,10 +4,9 @@ import { parseAmount } from "../amount";
 export const ERROR_CODES = [
   "VALIDATION_FAILED",
   "SECRET_KEY_REJECTED",
-  "WALLET_NOT_VERIFIED",
   "ACCOUNT_NOT_FOUND",
-  "NO_TRUSTLINE",
-  "TRUSTLINE_LIMIT_TOO_LOW",
+  "INSUFFICIENT_FUNDS",
+  "TX_MISMATCH",
   "INVALID_SIGNATURE",
   "CHALLENGE_EXPIRED",
   "UNAUTHENTICATED",
@@ -17,10 +16,12 @@ export const ERROR_CODES = [
   "FORBIDDEN_ORIGIN",
   "NOT_FOUND",
   "INVALID_TRANSITION",
-  "PAYMENT_NOT_ASSIGNABLE",
+  "RUN_LOCKED",
+  "NOTHING_TO_PAY",
+  "WALLET_IN_USE",
   "WALLET_TAKEN",
+  "NAME_TAKEN",
   "EMAIL_TAKEN",
-  "IDEMPOTENCY_MISMATCH",
   "LIMIT_REACHED",
   "PAYLOAD_TOO_LARGE",
   "RATE_LIMITED",
@@ -30,48 +31,14 @@ export const ERROR_CODES = [
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
-export const REQUEST_STATUSES = [
-  "PENDING",
-  "UNDERPAID",
-  "PAID",
-  "OVERPAID",
-  "EXPIRED",
-  "CANCELLED",
-  "NETWORK_RESET",
-] as const;
-export type RequestStatus = (typeof REQUEST_STATUSES)[number];
-export const OPEN_STATUSES = ["PENDING", "UNDERPAID"] as const satisfies readonly RequestStatus[];
-
-export const PAYMENT_OUTCOMES = [
-  "COUNTED",
-  "DUPLICATE",
-  "LATE",
-  "AFTER_CANCEL",
-  "WRONG_ASSET",
-  "WRONG_ISSUER",
-  "WRONG_WALLET",
-  "NO_MEMO",
-  "UNKNOWN_MEMO",
-  "MEMO_TYPE_MISMATCH",
-  "AFTER_RESET",
-] as const;
-export type PaymentOutcome = (typeof PAYMENT_OUTCOMES)[number];
-/** Outcomes a merchant may assign to a request by hand. */
-export const UNMATCHED_OUTCOMES = [
-  "NO_MEMO",
-  "UNKNOWN_MEMO",
-  "MEMO_TYPE_MISMATCH",
-] as const satisfies readonly PaymentOutcome[];
-
-export const ASSET_CODES = ["USDC", "XLM"] as const;
-export type AssetCode = (typeof ASSET_CODES)[number];
-
-export const CANNOT_RECEIVE_REASONS = [
+/** Why a wallet cannot receive USDC right now. */
+export const RECEIVE_PROBLEMS = [
   "ACCOUNT_NOT_FOUND",
   "NO_TRUSTLINE",
+  "NOT_AUTHORIZED",
   "TRUSTLINE_LIMIT_TOO_LOW",
 ] as const;
-export type CannotReceiveReason = (typeof CANNOT_RECEIVE_REASONS)[number];
+export type ReceiveProblem = (typeof RECEIVE_PROBLEMS)[number];
 
 export const ErrorResponseSchema = z.object({
   error: z.object({
@@ -105,5 +72,4 @@ export const PaginationQuery = {
   cursor: z.string().min(1).max(512).optional(),
 };
 
-export const AssetSchema = z.object({ code: z.string(), issuer: z.string().nullable() });
 export const IsoDate = z.string().datetime();

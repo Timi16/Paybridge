@@ -1,35 +1,32 @@
-import type { PaymentRequest as RequestDto, Wallet as WalletDto } from "@paybridge/shared";
-import { Keypair } from "@stellar/stellar-sdk";
+import type { Employee, Run, SignableBatch, Wallet as WalletDto } from "@paybridge/shared";
+import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
 import pino from "pino";
 import request from "supertest";
 import type TestAgent from "supertest/lib/agent";
 import { buildApp } from "../../src/app";
-import { CHANNELS, PgListener } from "../../src/db/notify";
 import { prisma } from "../../src/db/prisma";
 import type { Limits } from "../../src/deps";
-import { Ingestion, type IngestionDeps } from "../../src/engine/ingestion";
 import type { Mail, Mailer } from "../../src/lib/mailer";
-import type { NormalizedPayment } from "../../src/engine/types";
-import { WatchedWallets } from "../../src/engine/watchedWallets";
-import { LiveHub } from "../../src/modules/stream/hub";
-import { CapturingAlerter, FakeAccounts, FakeBackfill, FakeStellarSource, type PaymentInput } from "./fakes";
+import { createPayrollService } from "../../src/modules/payroll/service";
+import { DEFAULT_LIMITS } from "../../src/deps";
+import { FakeStellar } from "./fakes";
 import { TEST_WEB_ORIGIN } from "./setupEnv";
 
 export { prisma };
 export const ORIGIN = TEST_WEB_ORIGIN;
+export const PASSPHRASE = "Test SDF Network ; September 2015";
 export const silentLogger = pino({ level: "silent" });
 
 const NO_LIMITS: Partial<Limits> = {
   authPerMin: 10_000,
   authReadPerMin: 10_000,
-  publicPerMin: 10_000,
   v1PerMin: 10_000,
   v1PerIpPerMin: 10_000,
 };
 
 export async function resetDb(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "RequestEvent", "ChainPayment", "PaymentRequest", "WalletChallenge", "Wallet", "ApiKey", "Session", "PasswordReset", "EmailVerification", "TrustedDevice", "LoginThrottle", "RateLimit", "Merchant", "Cursor" CASCADE',
+    'TRUNCATE "PayrollEvent", "PayrollItem", "PayrollBatch", "PayrollRun", "Employee", "Group", "WalletChallenge", "Wallet", "ApiKey", "Session", "PasswordReset", "EmailVerification", "TrustedDevice", "LoginThrottle", "RateLimit", "Company" CASCADE',
   );
 }
 
@@ -41,45 +38,42 @@ export class CapturingMailer implements Mailer {
   }
 }
 
-export function makeApp(limits: Partial<Limits> = {}, opts: { mailer?: Mailer | null; verifyEmail?: boolean } = {}) {
-  const accounts = new FakeAccounts();
-  const hub = new LiveHub(prisma, silentLogger);
+export function makeApp(limits: Partial<Limits> = {}, opts: { mailer?: Mailer | null; verifyEmail?: boolean; batchWindowSeconds?: number } = {}) {
+  const stellar = new FakeStellar();
   const mailer = opts.mailer === undefined ? new CapturingMailer() : opts.mailer;
-  const built = buildApp({ prisma, accounts, hub, logger: silentLogger, mailer, verifyEmail: opts.verifyEmail ?? false, limits: { ...NO_LIMITS, ...limits } });
-  return { ...built, accounts, hub, mailer: mailer as CapturingMailer };
+  const batchWindowSeconds = opts.batchWindowSeconds ?? 300;
+  const built = buildApp({
+    prisma,
+    stellar,
+    logger: silentLogger,
+    mailer,
+    verifyEmail: opts.verifyEmail ?? false,
+    limits: { ...NO_LIMITS, ...limits },
+    batchWindowSeconds,
+  });
+  // The same service the worker runs (confirmer), over the same fake network.
+  const payroll = createPayrollService({ prisma, stellar, logger: silentLogger, limits: DEFAULT_LIMITS, mailer, verifyEmail: false, batchWindowSeconds });
+  return { ...built, stellar, payroll, mailer: mailer as CapturingMailer };
 }
 export type TestApp = ReturnType<typeof makeApp>;
 
-/** Connects the hub to real Postgres NOTIFY, as server.ts does. Remember to stop it. */
-export async function startListener(hub: LiveHub): Promise<PgListener> {
-  const listener = new PgListener({
-    connectionString: process.env.DATABASE_URL as string,
-    channels: [CHANNELS.requestUpdated, CHANNELS.paymentDetected, CHANNELS.walletsChanged],
-    onNotification: hub.handleNotification,
-    onConnect: hub.resync,
-    logger: silentLogger,
-  });
-  await listener.start();
-  return listener;
-}
-
 let counter = 0;
 
-export interface TestMerchant {
+export interface TestCompany {
   agent: TestAgent;
   id: string;
   email: string;
   password: string;
 }
 
-/** Signs a merchant up through the API and returns a cookie-carrying agent. */
-export async function signup(t: TestApp, businessName = "Acme Shop"): Promise<TestMerchant> {
+/** Signs a company up through the API and returns a cookie-carrying agent. */
+export async function signup(t: TestApp, businessName = "Northwind Studio"): Promise<TestCompany> {
   const agent = request.agent(t.app);
-  const email = `merchant${++counter}-${Date.now()}@example.com`;
+  const email = `company${++counter}-${Date.now()}@example.com`;
   const password = "correct horse battery";
   const res = await agent.post("/auth/signup").set("Origin", ORIGIN).send({ email, password, businessName });
   if (res.status !== 201) throw new Error(`signup failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return { agent, id: (res.body as { merchant: { id: string } }).merchant.id, email, password };
+  return { agent, id: (res.body as { company: { id: string } }).company.id, email, password };
 }
 
 export interface TestWallet {
@@ -88,72 +82,76 @@ export interface TestWallet {
   keypair: Keypair;
 }
 
-/** Adds a wallet and proves ownership with a real SEP-53 signature. */
-export async function addVerifiedWallet(m: TestMerchant, keypair = Keypair.random()): Promise<TestWallet> {
-  const added = await m.agent.post("/v1/wallets").set("Origin", ORIGIN).send({ address: keypair.publicKey() });
+/** Adds a funding wallet and gives it USDC and XLM on the fake network. */
+export async function addFundingWallet(t: TestApp, c: TestCompany, usdc = "100000", keypair = Keypair.random()): Promise<TestWallet> {
+  t.stellar.fund(keypair.publicKey(), usdc);
+  const added = await c.agent.post("/v1/wallets").set("Origin", ORIGIN).send({ address: keypair.publicKey(), label: "Payroll" });
   if (added.status !== 201) throw new Error(`add wallet failed: ${JSON.stringify(added.body)}`);
   const wallet = (added.body as { wallet: WalletDto }).wallet;
-  const challenge = await m.agent.post(`/v1/wallets/${wallet.id}/challenge`).set("Origin", ORIGIN).send();
-  const { challengeId, message } = challenge.body as { challengeId: string; message: string };
-  const signature = Buffer.from(keypair.signMessage(message)).toString("base64");
-  const verified = await m.agent
-    .post(`/v1/wallets/${wallet.id}/verify`)
-    .set("Origin", ORIGIN)
-    .send({ challengeId, signature });
-  if (verified.status !== 200) throw new Error(`verify failed: ${JSON.stringify(verified.body)}`);
   return { id: wallet.id, address: wallet.address, keypair };
 }
 
-export async function createRequest(
-  m: TestMerchant,
-  wallet: TestWallet,
-  body: Record<string, unknown> = {},
-): Promise<RequestDto> {
-  const res = await m.agent
-    .post("/v1/payment-requests")
+export async function addEmployee(c: TestCompany, body: Partial<{ name: string; walletAddress: string; defaultAmount: string; groupId: string | null; email: string }> = {}): Promise<Employee> {
+  const res = await c.agent
+    .post("/v1/employees")
     .set("Origin", ORIGIN)
-    .send({ walletId: wallet.id, amount: "50", asset: "USDC", ...body });
-  if (res.status !== 201) throw new Error(`create request failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return (res.body as { request: RequestDto }).request;
+    .send({ name: `Person ${++counter}`, walletAddress: Keypair.random().publicKey(), defaultAmount: "1000", ...body });
+  if (res.status !== 201) throw new Error(`add employee failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return (res.body as { employee: Employee }).employee;
 }
 
-/** Merchant + verified wallet in one call. */
-export async function setupMerchant(t: TestApp, name?: string) {
-  const merchant = await signup(t, name);
-  const wallet = await addVerifiedWallet(merchant);
-  return { merchant, wallet };
+export async function createRun(c: TestCompany, wallet: TestWallet, body: Record<string, unknown>): Promise<Run> {
+  const res = await c.agent.post("/v1/payroll-runs").set("Origin", ORIGIN).send({ name: "October payroll", walletId: wallet.id, ...body });
+  if (res.status !== 201) throw new Error(`create run failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return (res.body as { run: Run }).run;
 }
 
-export function makeEngine(over: Partial<IngestionDeps> = {}) {
-  const source = new FakeStellarSource();
-  const backfill = new FakeBackfill();
-  const alerter = new CapturingAlerter();
-  const watched = new WatchedWallets(prisma, 0); // always refresh: tests add wallets constantly
-  const ingestion = new Ingestion({
-    prisma,
-    source,
-    backfill,
-    watched,
-    alerter,
-    logger: silentLogger,
-    networkPassphrase: "Test SDF Network ; September 2015",
-    ...over,
-  });
-  /** Closes one ledger with these payments and ingests it. */
-  const pay = async (payments: PaymentInput | PaymentInput[], closedAt: Date = new Date()): Promise<NormalizedPayment[]> => {
-    const made = source.closeLedger(closedAt, Array.isArray(payments) ? payments : [payments]);
-    await ingestion.tick();
-    return made;
-  };
-  return { source, backfill, alerter, watched, ingestion, pay };
+/** Company, funded wallet and `n` people who can all receive. */
+export async function setupPayroll(t: TestApp, n = 3, amount = "1000") {
+  const company = await signup(t);
+  const wallet = await addFundingWallet(t, company);
+  const people: Employee[] = [];
+  for (let i = 0; i < n; i++) people.push(await addEmployee(company, { defaultAmount: amount }));
+  return { company, wallet, people };
 }
-export type TestEngine = ReturnType<typeof makeEngine>;
+
+export function post(c: TestCompany, path: string, body: unknown = {}) {
+  return c.agent.post(path).set("Origin", ORIGIN).send(body as object);
+}
+
+/** Signs a batch envelope as Freighter would. */
+export function sign(batch: SignableBatch, keypair: Keypair): string {
+  const tx = TransactionBuilder.fromXDR(batch.xdr, PASSPHRASE);
+  tx.sign(keypair);
+  return tx.toXDR();
+}
+
+export async function nextBatch(c: TestCompany, runId: string): Promise<{ batch: SignableBatch | null; run: Run }> {
+  const res = await post(c, `/v1/payroll-runs/${runId}/batches/next`);
+  if (res.status !== 200) throw new Error(`next batch failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return res.body as { batch: SignableBatch | null; run: Run };
+}
+
+export async function submit(c: TestCompany, runId: string, batch: SignableBatch, signedXdr: string) {
+  return post(c, `/v1/payroll-runs/${runId}/batches/${batch.id}/submit`, { signedXdr });
+}
+
+/** Start, then sign and submit every batch until there is nothing left to sign. */
+export async function payAll(c: TestCompany, runId: string, wallet: TestWallet): Promise<Run> {
+  const started = await post(c, `/v1/payroll-runs/${runId}/start`);
+  if (started.status !== 200) throw new Error(`start failed: ${started.status} ${JSON.stringify(started.body)}`);
+  for (let i = 0; i < 20; i++) {
+    const { batch, run } = await nextBatch(c, runId);
+    if (!batch) return run;
+    const res = await submit(c, runId, batch, sign(batch, wallet.keypair));
+    if (res.status !== 200) throw new Error(`submit failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+  throw new Error("too many batches");
+}
+
+export async function getRun(c: TestCompany, runId: string): Promise<Run> {
+  const res = await c.agent.get(`/v1/payroll-runs/${runId}`);
+  return (res.body as { run: Run }).run;
+}
 
 export const USDC = (units: string | number): bigint => BigInt(units) * 10_000_000n;
-
-export async function getRequest(id: string) {
-  return prisma.paymentRequest.findUniqueOrThrow({ where: { id } });
-}
-export async function getPayment(eventId: string) {
-  return prisma.chainPayment.findUniqueOrThrow({ where: { eventId } });
-}

@@ -7,82 +7,74 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Merchant {
-  id           String            @id @default(cuid())
-  email        String            @unique
-  passwordHash String
-  businessName String
-  emailVerifiedAt DateTime? // set once the merchant entered the code emailed at sign-up
+model Company {
+  id                String             @id @default(cuid())
+  email             String             @unique
+  passwordHash      String
+  businessName      String
+  emailVerifiedAt   DateTime? // set once the company entered the code emailed at sign-up
   emailVerification EmailVerification?
-  // Opt-in: a payment with no memo that exactly settles the one open request it could
-  // belong to is matched automatically instead of waiting for a manual assign.
-  autoMatchByAmount Boolean      @default(false)
-  supportContact String? // support email; shown on the pay page
-  website        String? // "Back to <business>" on the pay page
-  brandColor     String  @default("#1E4FD6") // accent on the pay page
-  defaultAsset   String  @default("USDC") // dashboard prefill for new requests
-  acceptedAssets String  @default("BOTH") // "BOTH" | "USDC" | "XLM"
-  toleranceBps   Int     @default(0) // 50 = a shortfall of up to 0.5% still counts as paid
-  notifyPaid     Boolean @default(true) // email the merchant when a request is paid
-  notifyProblems Boolean @default(true) // email the merchant when a payment needs a look
-  closedAt       DateTime?
-  defaultWalletId String? // dashboard prefill for new requests
-  defaultExpiryMinutes Int       @default(15) // dashboard prefill for new requests
-  createdAt    DateTime          @default(now())
-  devices      TrustedDevice[]
-  passwordResets PasswordReset[]
-  sessions     Session[]
-  apiKeys      ApiKey[]
-  wallets      Wallet[]
-  requests     PaymentRequest[]
-  challenges   WalletChallenge[]
+  notifyPaid        Boolean            @default(true) // email when a run finishes paid
+  notifyProblems    Boolean            @default(true) // email when a run finishes with failed lines
+  closedAt          DateTime?
+  runCounter        Int                @default(0) // last PayrollRun.number handed out
+  createdAt         DateTime           @default(now())
+  devices           TrustedDevice[]
+  passwordResets    PasswordReset[]
+  sessions          Session[]
+  apiKeys           ApiKey[]
+  wallets           Wallet[]
+  challenges        WalletChallenge[]
+  groups            Group[]
+  employees         Employee[]
+  runs              PayrollRun[]
 }
 
 model Session {
   id         String   @id // HMAC-SHA256 of the cookie token
-  merchantId String
-  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
   expiresAt  DateTime
   createdAt  DateTime @default(now())
   lastSeenAt DateTime @default(now()) // refreshed at most every 5 minutes
   ip         String?
   userAgent  String?
 
-  @@index([merchantId])
+  @@index([companyId])
 }
 
 // A browser that has logged in successfully before. It is exempt from the account-wide
-// login lock, so an attacker hammering a merchant's email cannot lock the merchant out.
+// login lock, so an attacker hammering a company's email cannot lock the company out.
 model TrustedDevice {
   id         String   @id // HMAC-SHA256 of the device cookie token
-  merchantId String
-  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
   lastUsedAt DateTime @default(now())
 
-  @@index([merchantId])
+  @@index([companyId])
 }
 
-// The six-digit code emailed at sign-up. One live code per merchant; only its keyed hash is stored.
+// The six-digit code emailed at sign-up. One live code per company; only its keyed hash is stored.
 model EmailVerification {
-  merchantId String   @id
-  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  codeHash   String
-  expiresAt  DateTime
-  attempts   Int      @default(0) // wrong guesses against this code
-  sentAt     DateTime @default(now())
+  companyId String   @id
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int      @default(0) // wrong guesses against this code
+  sentAt    DateTime @default(now())
 }
 
 // One-hour, single-use password reset link. Only the keyed hash of the token is stored.
 model PasswordReset {
-  id         String    @id // HMAC-SHA256 of the token in the emailed link
-  merchantId String
-  merchant   Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id // HMAC-SHA256 of the token in the emailed link
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
-  @@index([merchantId, createdAt])
+  @@index([companyId, createdAt])
 }
 
 // Failed-login counters, shared by every API instance.
@@ -104,8 +96,8 @@ model RateLimit {
 
 model ApiKey {
   id         String    @id @default(cuid())
-  merchantId String
-  merchant   Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
   name       String
   prefix     String // e.g. "pb_test_9f2a"
   keyHash    String    @unique
@@ -113,162 +105,195 @@ model ApiKey {
   revokedAt  DateTime?
   createdAt  DateTime  @default(now())
 
-  @@index([merchantId])
+  @@index([companyId])
 }
 
+// A Stellar account the company pays payroll from. PayBridge never holds its key: the company
+// signs each batch in Freighter.
 model Wallet {
-  id            String           @id @default(cuid())
-  merchantId    String
-  merchant      Merchant         @relation(fields: [merchantId], references: [id])
-  address       String // base G address; one ACTIVE wallet per address (enforced in the wallet service)
+  id            String       @id @default(cuid())
+  companyId     String
+  company       Company      @relation(fields: [companyId], references: [id])
+  address       String // base G address
   label         String?
-  verifiedAt    DateTime? // set after a valid signed challenge
-  accountExists Boolean          @default(false)
-  trustlines    Json             @default("[]") // [{ code, issuer, limit, balance, buyingLiabilities, authorized }] cached from Horizon
+  verifiedAt    DateTime? // optional SEP-53 ownership proof
+  accountExists Boolean      @default(false)
+  trustlines    Json         @default("[]") // [{ code, issuer, limit, balance, buyingLiabilities, sellingLiabilities, authorized }]
+  nativeBalance String? // XLM balance as Horizon reports it, cached for display
   checkedAt     DateTime?
-  deletedAt     DateTime? // soft delete; still watched while it has open requests
-  createdAt     DateTime         @default(now())
-  requests      PaymentRequest[]
-  payments      ChainPayment[]
+  deletedAt     DateTime?
+  createdAt     DateTime     @default(now())
+  runs          PayrollRun[]
 
-  @@index([merchantId])
+  @@index([companyId])
   @@index([address])
 }
 
 model WalletChallenge {
-  id         String    @id @default(cuid())
-  merchantId String
-  merchant   Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  address    String
-  message    String // "PayBridge wallet verification\nMerchant: …\nWallet: …\nNonce: …\nExpires: …"
-  expiresAt  DateTime // 10 minutes
-  usedAt     DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  address   String
+  message   String // "PayBridge wallet verification\nCompany: …\nWallet: …\nNonce: …\nExpires: …"
+  expiresAt DateTime // 10 minutes
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
-  @@index([merchantId, address])
+  @@index([companyId, address])
 }
 
-enum RequestStatus {
-  PENDING
-  UNDERPAID
+model Group {
+  id        String     @id @default(cuid())
+  companyId String
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime   @default(now())
+  employees Employee[]
+
+  @@unique([companyId, name])
+}
+
+model Employee {
+  id                   String        @id @default(cuid())
+  companyId            String
+  company              Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name                 String
+  email                String?
+  role                 String?
+  walletAddress        String // base G address; one active employee per (company, wallet)
+  defaultAmountStroops BigInt
+  groupId              String?
+  group                Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  archivedAt           DateTime?
+  checkReason          String? // null = can receive USDC; else ACCOUNT_NOT_FOUND | NO_TRUSTLINE | NOT_AUTHORIZED | TRUSTLINE_LIMIT_TOO_LOW
+  checkedAt            DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  items                PayrollItem[]
+
+  @@index([companyId, createdAt])
+  @@index([companyId, walletAddress])
+}
+
+enum RunStatus {
+  DRAFT
+  PAYING
   PAID
-  OVERPAID
-  EXPIRED
+  PARTIAL
+  FAILED
   CANCELLED
-  NETWORK_RESET
 }
 
-model PaymentRequest {
-  id              String         @id @default(cuid())
-  publicId        String         @unique // 12 random base62 chars, used in /pay/{publicId}
-  merchantId      String
-  merchant        Merchant       @relation(fields: [merchantId], references: [id])
-  walletId        String
-  wallet          Wallet         @relation(fields: [walletId], references: [id])
-  walletAddress   String // snapshot
-  assetCode       String // snapshot
-  assetIssuer     String? // snapshot; null = XLM
-  amountStroops   BigInt
-  toleranceStroops BigInt        @default(0) // snapshot: a shortfall up to this still counts as paid
-  customerEmail   String? // for the receipt; never shown on the pay page
-  paidNotifiedAt  DateTime? // "paid" emails went out (at most once per request)
-  receivedStroops BigInt         @default(0)
-  memo            String         @unique // "PB" + 8 Crockford base32, stored uppercase
-  status          RequestStatus  @default(PENDING)
-  description     String?
-  customerRef     String? // merchant's own order ID
-  metadata        Json?
-  expiresAt       DateTime
-  paidAt          DateTime?
-  paidTxHash      String? // tx that completed the payment
-  cancelledAt     DateTime?
-  refundedAt      DateTime? // merchant recorded sending back what the request itself owed
-  refundTxHash    String?
-  idempotencyKey  String?
-  idempotencyHash String? // sha256 of the create body, to detect key reuse with a different body
-  createdVia      String // "dashboard" | "api"
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  payments        ChainPayment[]
-  events          RequestEvent[]
-
-  @@unique([merchantId, idempotencyKey])
-  @@index([merchantId, createdAt])
-  @@index([status, expiresAt])
-  @@index([walletId, status])
+enum ItemStatus {
+  PENDING
+  SENDING
+  PAID
+  FAILED
+  CANCELLED
 }
 
-enum PaymentOutcome {
-  COUNTED // applied to the request's received amount
-  DUPLICATE // request already PAID or OVERPAID
-  LATE // ledger time after expiresAt
-  AFTER_CANCEL
-  WRONG_ASSET
-  WRONG_ISSUER // same code, different issuer (counterfeit)
-  WRONG_WALLET // memo belongs to a request on another wallet
-  NO_MEMO
-  UNKNOWN_MEMO
-  MEMO_TYPE_MISMATCH
-  AFTER_RESET
+enum BatchStatus {
+  AWAITING_SIGNATURE
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  EXPIRED
 }
 
-model ChainPayment {
-  eventId          String          @id // RPC event id ("hz-…" when backfilled from Horizon)
-  txHash           String
-  innerTxHash      String?
-  ledger           Int
-  ledgerClosedAt   DateTime
-  walletId         String
-  wallet           Wallet          @relation(fields: [walletId], references: [id])
-  fromAddress      String
-  toAddress        String // base G
-  toMuxedId        String?
-  memoRaw          String?
-  memoNormalized   String?
-  memoType         String // "none" | "text" | "id" | "hash"
-  assetCode        String
-  assetIssuer      String?
-  amountStroops    BigInt
-  eventType        String // "transfer" | "mint"
-  source           String // "rpc" | "horizon"
-  requestId        String?
-  request          PaymentRequest? @relation(fields: [requestId], references: [id])
-  outcome          PaymentOutcome
-  matchedBy        String? // "memo" | "amount" | "manual"; null when not tied to a request by PayBridge
-  assignedManually Boolean         @default(false)
-  assignedAt       DateTime?
-  notifiedAt       DateTime? // the notifier has looked at this payment
-  refundedAt       DateTime? // merchant recorded sending this payment back
-  refundTxHash     String?
-  createdAt        DateTime        @default(now())
+model PayrollRun {
+  id            String         @id @default(cuid())
+  companyId     String
+  company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  number        Int // per company: 1, 2, 3…
+  name          String
+  payDate       DateTime?      @db.Date
+  walletId      String
+  wallet        Wallet         @relation(fields: [walletId], references: [id])
+  walletAddress String // snapshot of the funding wallet
+  assetCode     String
+  assetIssuer   String
+  status        RunStatus      @default(DRAFT)
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  notifiedAt    DateTime? // the notifier has emailed about the finish
+  createdVia    String // "dashboard" | "api"
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  items         PayrollItem[]
+  batches       PayrollBatch[]
+  events        PayrollEvent[]
 
-  @@index([walletId, createdAt])
-  @@index([walletId, ledgerClosedAt])
-  @@index([requestId])
-  @@index([outcome])
-  @@index([txHash])
+  @@unique([companyId, number])
+  @@index([companyId, createdAt])
+  @@index([status])
 }
 
-model RequestEvent {
-  id             String         @id @default(cuid())
-  requestId      String
-  request        PaymentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  fromStatus     RequestStatus
-  toStatus       RequestStatus
-  reason         String // "payment_counted" | "expired" | "cancelled" | "accepted" | "network_reset"
-  actor          String // "system" | "merchant" | "api"
-  paymentEventId String?
-  createdAt      DateTime       @default(now())
+model PayrollItem {
+  id            String        @id @default(cuid())
+  runId         String
+  run           PayrollRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  companyId     String
+  employeeId    String?
+  employee      Employee?     @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  position      Int // order on the run, 1-based
+  name          String // snapshot
+  walletAddress String // snapshot
+  amountStroops BigInt
+  status        ItemStatus    @default(PENDING)
+  failureCode   String?
+  failureDetail String? // raw Stellar result code, when there is one
+  batchId       String?
+  batch         PayrollBatch? @relation(fields: [batchId], references: [id])
+  opIndex       Int?
+  txHash        String?
+  ledger        Int?
+  paidAt        DateTime? // ledger close time
+  attempts      Int           @default(0) // batches this line has been put in
+  createdAt     DateTime      @default(now())
 
-  @@index([requestId, createdAt])
+  @@unique([runId, employeeId])
+  @@index([runId, position])
+  @@index([companyId, status])
+  @@index([batchId])
 }
 
-model Cursor {
-  name               String    @id // "rpc-events"
-  ledger             Int // last fully processed ledger
-  pagingToken        String?
-  ledgerClosedAt     DateTime? // close time of the last fully processed ledger (used by the expiry sweeper)
-  networkPassphrase  String
-  lastNetworkResetAt DateTime?
-  updatedAt          DateTime  @updatedAt
+model PayrollBatch {
+  id           String        @id @default(cuid())
+  runId        String
+  run          PayrollRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  companyId    String
+  number       Int // per run
+  txHash       String        @unique // hash of the unsigned transaction; signing does not change it
+  envelopeXdr  String
+  signedXdr    String?
+  sequence     String
+  maxTime      DateTime // timebound: cannot land in a ledger that closes after this
+  opCount      Int
+  totalStroops BigInt
+  status       BatchStatus   @default(AWAITING_SIGNATURE)
+  resultCode   String? // tx_failed, tx_bad_seq, … on failure
+  ledger       Int?
+  closedAt     DateTime?
+  submittedAt  DateTime?
+  settledAt    DateTime?
+  createdAt    DateTime      @default(now())
+  items        PayrollItem[]
+
+  @@unique([runId, number])
+  @@index([status])
+}
+
+// Append-only audit trail of a run.
+model PayrollEvent {
+  id        String     @id @default(cuid())
+  runId     String
+  run       PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  itemId    String?
+  batchId   String?
+  type      String // "created" | "started" | "excluded" | "batch_built" | "submitted" | "confirmed" | "batch_failed" | "expired" | "line_failed" | "retried" | "cancelled" | "finished"
+  message   String
+  actor     String // "company" | "api" | "system"
+  createdAt DateTime   @default(now())
+
+  @@index([runId, createdAt])
 }

@@ -15,6 +15,7 @@ export const REDACT_PATHS = [
   "*.token",
   "*.secret",
   "*.signature",
+  "*.signedXdr",
   "password",
   "key",
   "token",

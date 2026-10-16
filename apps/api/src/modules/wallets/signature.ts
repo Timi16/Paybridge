@@ -13,7 +13,7 @@ import { Keypair } from "@stellar/stellar-sdk";
  * Accepted encodings: base64 (Freighter API v4+), hex, or raw bytes / a JSON-serialised
  * Buffer (Freighter API v3). Wallets from before SEP-53 signed the bare message bytes; that
  * form is accepted too. It proves control of the key just the same, and the challenge text
- * (fixed header, merchant, wallet, nonce, expiry) can never be mistaken for a transaction.
+ * (fixed header, company, wallet, nonce, expiry) can never be mistaken for a transaction.
  *
  * Test vector (generated with @stellar/stellar-sdk 17.2.1 and asserted in
  * test/unit/signature.test.ts; re-confirm against the installed Freighter build once):

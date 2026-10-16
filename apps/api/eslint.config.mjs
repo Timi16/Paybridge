@@ -14,8 +14,8 @@ const MONEY_RULES = [
 
 const STATUS_RULE = {
   selector:
-    "CallExpression[callee.property.name=/^(update|updateMany|upsert)$/][callee.object.property.name='paymentRequest'] Property[key.name='data'] Property[key.name='status']",
-  message: "Only modules/transitions.ts may change PaymentRequest.status. Call transitionRequest().",
+    "CallExpression[callee.property.name=/^(update|updateMany|upsert|create|createMany)$/][callee.object.property.name=/^(payrollRun|payrollItem|payrollBatch)$/] Property[key.name='data'] Property[key.name='status']",
+  message: "Only modules/payroll/transitions.ts may change a run, line or batch status.",
 };
 
 export default tseslint.config(
@@ -32,7 +32,9 @@ export default tseslint.config(
     },
   },
   {
-    files: ["src/modules/transitions.ts"],
+    // transitions.ts is the one place statuses change. The seed script writes demo rows that
+    // are already in their final states, straight to a local database.
+    files: ["src/modules/payroll/transitions.ts", "scripts/seed.ts"],
     rules: { "no-restricted-syntax": ["error", ...MONEY_RULES] },
   },
 );

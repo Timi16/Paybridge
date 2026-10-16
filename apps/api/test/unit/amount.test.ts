@@ -11,7 +11,7 @@ describe("amount", () => {
     expect(parseAmount("922337203685.4775807")).toBe(MAX_STROOPS);
   });
 
-  it("M8: rejects negative, >7 decimals, too large and malformed amounts", () => {
+  it("E3: rejects negative, >7 decimals, too large and malformed amounts", () => {
     for (const bad of ["-1", "1.00000001", "922337203685.4775808", "999999999999.9999999", "1e3", "1,5", " 1", "1.", ".5", "", "abc", "0x10", "1234567890123"]) {
       expect(parseAmount(bad), bad).toBeNull();
     }
@@ -24,7 +24,7 @@ describe("amount", () => {
     expect(formatStroops(MAX_STROOPS)).toBe("922337203685.4775807");
   });
 
-  it("P18: one stroop is never rounded away (round-trips exactly)", () => {
+  it("one stroop is never rounded away (round-trips exactly)", () => {
     fc.assert(
       fc.property(fc.bigInt({ min: 0n, max: MAX_STROOPS }), (stroops) => {
         expect(parseAmount(formatStroops(stroops))).toBe(stroops);

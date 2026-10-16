@@ -1,36 +1,23 @@
 import { buildApp } from "./app";
 import { env, isProduction } from "./config/env";
-import { CHANNELS, PgListener } from "./db/notify";
 import { prisma } from "./db/prisma";
 import { logger } from "./lib/logger";
 import { createMailer } from "./lib/mailer";
-import { LiveHub } from "./modules/stream/hub";
-import { HorizonAccountLoader } from "./modules/wallets/horizonAccounts";
+import { HorizonGateway } from "./stellar/horizonGateway";
 
 // api process
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
 async function main(): Promise<void> {
-  const hub = new LiveHub(prisma, logger);
-  // One pg connection LISTENs and fans out to in-memory SSE subscribers.
-  const listener = new PgListener({
-    connectionString: env.DATABASE_URL,
-    channels: [CHANNELS.requestUpdated, CHANNELS.paymentDetected, CHANNELS.walletsChanged],
-    onNotification: hub.handleNotification,
-    onConnect: hub.resync,
-    logger,
-  });
-  await listener.start();
-
-  const { app, sse } = buildApp({
+  const { app } = buildApp({
     prisma,
-    accounts: new HorizonAccountLoader(env.HORIZON_URL),
-    hub,
+    stellar: new HorizonGateway(env.HORIZON_URL),
     logger,
     mailer: createMailer({ smtpUrl: env.SMTP_URL, from: env.MAIL_FROM, production: isProduction }, logger),
     // Sign-up codes: by default only when a real mail server is configured.
     verifyEmail: env.EMAIL_VERIFICATION === "on" || (env.EMAIL_VERIFICATION === "auto" && Boolean(env.SMTP_URL)),
+    batchWindowSeconds: env.BATCH_WINDOW_SECONDS,
   });
 
   const server = app.listen(env.PORT, env.HOST, () => {
@@ -44,7 +31,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, "api shutting down");
-    // Stop accepting, close SSE streams, wait up to 10 s, then disconnect Prisma.
+    // Stop accepting, wait up to 10 s, then disconnect Prisma.
     const force = setTimeout(() => {
       logger.warn("shutdown grace period over; closing remaining connections");
       server.closeAllConnections();
@@ -52,11 +39,10 @@ async function main(): Promise<void> {
     force.unref();
     server.close(() => {
       clearTimeout(force);
-      Promise.allSettled([listener.stop(), prisma.$disconnect()])
+      Promise.allSettled([prisma.$disconnect()])
         .then(() => process.exit(0))
         .catch(() => process.exit(1));
     });
-    sse.closeAll();
     server.closeIdleConnections();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

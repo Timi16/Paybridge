@@ -1,19 +1,12 @@
 import type { Trustline } from "@paybridge/shared";
-import type { Alerter } from "../../src/engine/alerter";
-import type {
-  BackfillSource,
-  ChainTip,
-  FetchParams,
-  FetchResult,
-  StellarSource,
-} from "../../src/engine/sources/StellarSource";
-import type { NormalizedPayment } from "../../src/engine/types";
+import { TransactionBuilder, xdr, type Transaction } from "@stellar/stellar-sdk";
+import { formatStroops, parseAmount } from "../../src/lib/amount";
 import { AppError } from "../../src/lib/errors";
-import type { AccountLoader, AccountState } from "../../src/modules/wallets/horizonAccounts";
+import type { AccountState, FoundTransaction, LedgerInfo, StellarGateway, SubmitResult } from "../../src/stellar/gateway";
 
 export const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 export const FAKE_ISSUER = "GAGVZMODPYFTULIVSY3RGFADIC5LF4LLSN37N4MFWGNZ57TYBXL2LQQX";
-export const PAYER = "GAE6HVGQRXFG5BVAAVZBKP44U6JMFHYVDRAVGADJFHBSVS6RX7PETWFV";
+const PASSPHRASE = "Test SDF Network ; September 2015";
 
 export function usdcTrustline(over: Partial<Trustline> = {}): Trustline {
   return {
@@ -22,128 +15,199 @@ export function usdcTrustline(over: Partial<Trustline> = {}): Trustline {
     limit: "922337203685.4775807",
     balance: "0.0000000",
     buyingLiabilities: "0.0000000",
+    sellingLiabilities: "0.0000000",
     authorized: true,
     ...over,
   };
 }
 
-/** Stands in for Horizon account lookups. Unknown addresses exist with a USDC trustline. */
-export class FakeAccounts implements AccountLoader {
-  readonly states = new Map<string, AccountState>();
-  down = false;
-  calls = 0;
-
-  async load(address: string): Promise<AccountState> {
-    this.calls++;
-    if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
-    return this.states.get(address) ?? { exists: true, trustlines: [usdcTrustline()] };
-  }
+interface FakeAccount {
+  sequence: bigint;
+  xlm: bigint;
+  /** null = no USDC trustline. */
+  usdc: { balance: bigint; limit: bigint; authorized: boolean } | null;
+  subentries: number;
 }
 
-export class CapturingAlerter implements Alerter {
-  readonly messages: string[] = [];
-  async alert(message: string): Promise<void> {
-    this.messages.push(message);
-  }
+const units = (v: string) => {
+  const s = parseAmount(v);
+  if (s === null) throw new Error(`bad amount ${v}`);
+  return s;
+};
+
+type SubmitMode = "apply" | "unknown" | { reject: string };
+
+function paymentResult(code: string): xdr.OperationResult {
+  const pr =
+    code === "op_success"
+      ? xdr.PaymentResult.paymentSuccess()
+      : code === "op_no_trust"
+        ? xdr.PaymentResult.paymentNoTrust()
+        : code === "op_no_destination"
+          ? xdr.PaymentResult.paymentNoDestination()
+          : code === "op_not_authorized"
+            ? xdr.PaymentResult.paymentNotAuthorized()
+            : code === "op_line_full"
+              ? xdr.PaymentResult.paymentLineFull()
+              : xdr.PaymentResult.paymentUnderfunded();
+  return xdr.OperationResult.opInner(xdr.OperationResultTr.payment(pr));
 }
 
-const pad = (n: bigint, width: number) => n.toString().padStart(width, "0");
+export function resultXdr(ok: boolean, opCodes: string[]): string {
+  const ops = opCodes.map(paymentResult);
+  return new xdr.TransactionResult({
+    feeCharged: 100n * BigInt(opCodes.length),
+    result: ok ? xdr.TransactionResultResult.txSuccess(ops) : xdr.TransactionResultResult.txFailed(ops),
+    ext: xdr.TransactionResultExt.v0(),
+  }).toXdr("base64");
+}
 
-export type PaymentInput = Partial<NormalizedPayment> & { to: string; amountStroops: bigint };
-
-/** In-memory chain: ledgers close on demand and events page exactly like RPC getEvents. */
-export class FakeStellarSource implements StellarSource {
+/**
+ * A small in-memory Stellar: accounts with XLM and USDC, sequence numbers, timebounds, a ledger
+ * clock, and all-or-nothing transactions. Unknown addresses exist with an empty USDC trustline.
+ */
+export class FakeStellar implements StellarGateway {
+  readonly accounts = new Map<string, FakeAccount | null>();
+  readonly txs = new Map<string, FoundTransaction>();
+  /** Signed envelopes accepted with an "unknown" outcome, which can be landed later. */
+  readonly inFlight: string[] = [];
   ledger = 1000;
-  oldestLedger = 1;
-  failing = false;
-  /** When set, getTip answers like a lagging RPC node. */
-  staleTip: { ledger: number; closedAt: Date } | null = null;
-  fetchCalls = 0;
-  private events: NormalizedPayment[] = [];
-  // The chain starts an hour in the past so tests can close ledgers at earlier times.
-  private readonly closeTimes = new Map<number, Date>([[1000, new Date(Date.now() - 3_600_000)]]);
-  private seq = 0;
+  ledgerTime = new Date();
+  down = false;
+  submitMode: SubmitMode = "apply";
+  submits = 0;
+  loads = 0;
 
-  /** Closes a new ledger at `closedAt` containing `payments`. */
-  closeLedger(closedAt: Date = new Date(), payments: PaymentInput[] = []): NormalizedPayment[] {
-    this.ledger++;
-    this.closeTimes.set(this.ledger, closedAt);
-    const made = payments.map((p, i) => {
-      const toid = (BigInt(this.ledger) << 32n) | (BigInt(i + 1) << 12n);
-      const full: NormalizedPayment = {
-        eventId: `${pad(toid, 19)}-${pad(0n, 10)}`,
-        txHash: `tx${(++this.seq).toString().padStart(62, "0")}`,
-        innerTxHash: null,
-        ledger: this.ledger,
-        ledgerClosedAt: closedAt,
-        from: PAYER,
-        toMuxedId: null,
-        memoRaw: null,
-        memoType: "none",
-        assetCode: "USDC",
-        assetIssuer: USDC_ISSUER,
-        eventType: "transfer",
-        source: "rpc",
-        ...p,
-      };
-      if (p.memoRaw != null && p.memoType === undefined) full.memoType = "text";
-      return full;
-    });
-    this.events.push(...made);
-    return made;
-  }
-
-  /** Simulates a testnet wipe: history gone, ledger numbers restart. */
-  reset(toLedger: number): void {
-    this.ledger = toLedger;
-    this.oldestLedger = 1;
-    this.events = [];
-    this.closeTimes.clear();
-    this.closeTimes.set(toLedger, new Date());
-  }
-
-  async getTip(): Promise<ChainTip> {
-    if (this.failing) throw new Error("rpc unavailable");
-    if (this.staleTip) return { ...this.staleTip, oldestLedger: this.oldestLedger };
-    return {
-      ledger: this.ledger,
-      closedAt: this.closeTimes.get(this.ledger) ?? new Date(),
-      oldestLedger: this.oldestLedger,
-    };
-  }
-
-  async fetch(params: FetchParams): Promise<FetchResult> {
-    this.fetchCalls++;
-    if (this.failing) throw new Error("rpc unavailable");
-    if (!params.cursor && params.startLedger < this.oldestLedger) {
-      throw new Error("startLedger must be within the ledger range");
+  private account(address: string): FakeAccount | null {
+    if (!this.accounts.has(address)) {
+      this.accounts.set(address, { sequence: 100n, xlm: units("10"), usdc: { balance: 0n, limit: units("922337203685"), authorized: true }, subentries: 1 });
     }
-    const sorted = [...this.events].sort((a, b) => (a.eventId < b.eventId ? -1 : 1));
-    const after = params.cursor
-      ? sorted.filter((e) => e.eventId > (params.cursor as string))
-      : sorted.filter((e) => e.ledger >= params.startLedger);
-    const page = after.slice(0, params.limit);
-    const full = page.length >= params.limit;
-    const last = page[page.length - 1];
-    const endOfTip = `${pad((BigInt(this.ledger + 1) << 32n) - 1n, 19)}-4294967295`;
-    const throughLedger = full && last ? last.ledger - 1 : this.ledger;
+    return this.accounts.get(address) ?? null;
+  }
+
+  // ---- setup helpers ----
+  fund(address: string, usdc: string, xlm = "100"): void {
+    const a = this.account(address) ?? { sequence: 100n, xlm: 0n, usdc: null, subentries: 1 };
+    a.xlm = units(xlm);
+    a.usdc = { balance: units(usdc), limit: units("922337203685"), authorized: true };
+    this.accounts.set(address, a);
+  }
+  noAccount(address: string): void {
+    this.accounts.set(address, null);
+  }
+  noTrustline(address: string): void {
+    const a = this.account(address) ?? { sequence: 100n, xlm: units("10"), usdc: null, subentries: 0 };
+    a.usdc = null;
+    a.subentries = 0;
+    this.accounts.set(address, a);
+  }
+  addTrustline(address: string): void {
+    const a = this.account(address);
+    if (a && !a.usdc) a.usdc = { balance: 0n, limit: units("922337203685"), authorized: true };
+  }
+  setTrustline(address: string, over: { limit?: string; authorized?: boolean }): void {
+    const a = this.account(address);
+    if (!a?.usdc) throw new Error("no trustline");
+    if (over.limit !== undefined) a.usdc.limit = units(over.limit);
+    if (over.authorized !== undefined) a.usdc.authorized = over.authorized;
+  }
+  usdcBalance(address: string): string {
+    const a = this.accounts.get(address);
+    return a?.usdc ? formatStroops(a.usdc.balance) : "none";
+  }
+  /** Something else used the funding account's next sequence number. */
+  bumpSequence(address: string): void {
+    const a = this.account(address);
+    if (a) a.sequence += 1n;
+  }
+  closeLedger(ms = 5000): void {
+    this.ledger++;
+    this.ledgerTime = new Date(this.ledgerTime.getTime() + ms);
+  }
+
+  // ---- StellarGateway ----
+  async loadAccount(address: string): Promise<AccountState> {
+    this.loads++;
+    if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
+    const a = this.account(address);
+    if (!a) return { exists: false };
     return {
-      payments: page.filter((e) => params.isWatched(e.to)),
-      cursor: full && last ? last.eventId : endOfTip,
-      full,
-      processedThrough: { ledger: throughLedger, closedAt: this.closeTimes.get(throughLedger) ?? null },
-      latestLedger: this.ledger,
+      exists: true,
+      sequence: a.sequence.toString(),
+      nativeBalance: formatStroops(a.xlm),
+      nativeSellingLiabilities: "0.0000000",
+      subentries: a.subentries,
+      sponsoring: 0,
+      sponsored: 0,
+      trustlines: a.usdc
+        ? [usdcTrustline({ balance: formatStroops(a.usdc.balance), limit: formatStroops(a.usdc.limit), authorized: a.usdc.authorized })]
+        : [],
     };
   }
-}
 
-export class FakeBackfill implements BackfillSource {
-  readonly byAddress = new Map<string, NormalizedPayment[]>();
-  calls: { address: string; from: number; to: number }[] = [];
+  async latestLedger(): Promise<LedgerInfo> {
+    if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
+    return { sequence: this.ledger, closedAt: this.ledgerTime };
+  }
 
-  async *payments(address: string, from: number, to: number): AsyncIterable<NormalizedPayment[]> {
-    this.calls.push({ address, from, to });
-    const list = (this.byAddress.get(address) ?? []).filter((p) => p.ledger >= from && p.ledger <= to);
-    if (list.length > 0) yield list;
+  async getTransaction(hash: string): Promise<FoundTransaction | null> {
+    if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
+    return this.txs.get(hash) ?? null;
+  }
+
+  async submit(signedXdr: string): Promise<SubmitResult> {
+    this.submits++;
+    const mode = this.submitMode;
+    if (mode === "unknown") {
+      this.inFlight.push(signedXdr);
+      return { kind: "unknown" };
+    }
+    if (typeof mode === "object") return { kind: "failed", txCode: mode.reject, opCodes: [] };
+    return this.apply(signedXdr);
+  }
+
+  /** Lands every envelope that was left in flight. */
+  landInFlight(): SubmitResult[] {
+    return this.inFlight.splice(0).map((x) => this.apply(x));
+  }
+
+  /** Applies a signed envelope to the ledger, as the network would (also used for out-of-band submission). */
+  apply(signedXdr: string): SubmitResult {
+    const tx = TransactionBuilder.fromXDR(signedXdr, PASSPHRASE) as Transaction;
+    const hash = Buffer.from(tx.hash()).toString("hex");
+    if (this.txs.has(hash)) return { kind: "failed", txCode: "tx_bad_seq", opCodes: [] }; // already applied
+    const source = this.account(tx.source);
+    if (!source) return { kind: "failed", txCode: "tx_no_account", opCodes: [] };
+    const maxTime = Number.parseInt(tx.timeBounds?.maxTime ?? "0", 10);
+    if (maxTime > 0 && this.ledgerTime.getTime() / 1000 > maxTime) return { kind: "failed", txCode: "tx_too_late", opCodes: [] };
+    if (BigInt(tx.sequence) !== source.sequence + 1n) return { kind: "failed", txCode: "tx_bad_seq", opCodes: [] };
+
+    // All or nothing: work on copies, commit only if every operation succeeds.
+    source.sequence += 1n;
+    this.closeLedger();
+    const balances = new Map<string, bigint>();
+    const bal = (addr: string) => balances.get(addr) ?? this.accounts.get(addr)?.usdc?.balance ?? 0n;
+    const opCodes = tx.operations.map((op) => {
+      if (op.type !== "payment") return "op_malformed";
+      const dest = this.account(op.destination);
+      const amount = units(op.amount);
+      if (!dest) return "op_no_destination";
+      if (!dest.usdc) return "op_no_trust";
+      if (!dest.usdc.authorized) return "op_not_authorized";
+      if (bal(tx.source) < amount) return "op_underfunded";
+      if (bal(op.destination) + amount > dest.usdc.limit) return "op_line_full";
+      balances.set(tx.source, bal(tx.source) - amount);
+      balances.set(op.destination, bal(op.destination) + amount);
+      return "op_success";
+    });
+    const ok = opCodes.every((c) => c === "op_success");
+    if (ok) {
+      for (const [addr, value] of balances) {
+        const a = this.accounts.get(addr);
+        if (a?.usdc) a.usdc.balance = value;
+      }
+    }
+    this.txs.set(hash, { successful: ok, ledger: this.ledger, closedAt: this.ledgerTime, resultXdr: resultXdr(ok, opCodes) });
+    return ok ? { kind: "success", ledger: this.ledger, closedAt: this.ledgerTime } : { kind: "failed", txCode: "tx_failed", opCodes };
   }
 }

@@ -5,7 +5,6 @@ declare global {
     interface Request {
       requestId: string;
       auth?: AuthContext;
-      idempotencyKey?: string;
     }
   }
 }

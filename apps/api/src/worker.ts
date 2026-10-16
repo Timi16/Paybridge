@@ -1,22 +1,16 @@
 import { env, isProduction } from "./config/env";
-import { CHANNELS, PgListener } from "./db/notify";
 import { isDbUnavailable, prisma } from "./db/prisma";
-import { createAlerter } from "./engine/alerter";
-import { SWEEP_INTERVAL_MS, sweepExpired } from "./engine/expirySweeper";
-import { Ingestion } from "./engine/ingestion";
-import { RECONCILE_INTERVAL_MS, reconcile } from "./engine/reconciliation";
-import { HorizonBackfillSource } from "./engine/sources/horizonBackfill";
-import { RpcEventSource } from "./engine/sources/rpcEventSource";
-import { Watchdog, WATCHDOG_INTERVAL_MS } from "./engine/watchdog";
-import { WatchedWallets } from "./engine/watchedWallets";
+import { DEFAULT_LIMITS } from "./deps";
+import { CONFIRM_INTERVAL_MS, confirmOpenBatches } from "./engine/confirmer";
+import { NOTIFY_INTERVAL_MS, notifyRuns } from "./engine/notifier";
 import { logger } from "./lib/logger";
 import { createMailer } from "./lib/mailer";
-import { NOTIFY_INTERVAL_MS, notifyPayments } from "./engine/notifier";
 import { pruneCounters } from "./modules/auth/throttle";
+import { createPayrollService } from "./modules/payroll/service";
+import { HorizonGateway } from "./stellar/horizonGateway";
 
-// worker process: ingestion, reconciliation, watchdog, expiry sweeper.
+// worker process: batch confirmer, run notifier, housekeeping. Run exactly one.
 
-const POLL_MS = 2000;
 const controller = new AbortController();
 
 function sleep(ms: number): Promise<void> {
@@ -51,68 +45,37 @@ async function loop(name: string, fn: () => Promise<number>, backoff: boolean): 
 }
 
 async function main(): Promise<void> {
-  const alerter = createAlerter(logger, env.ALERT_TELEGRAM_BOT_TOKEN, env.ALERT_TELEGRAM_CHAT_ID);
-  const watched = new WatchedWallets(prisma);
-  const source = new RpcEventSource({
-    rpcUrl: env.STELLAR_RPC_URL,
-    networkPassphrase: env.NETWORK_PASSPHRASE,
-    logger,
-  });
-  const backfill = new HorizonBackfillSource({ horizonUrl: env.HORIZON_URL, logger });
-  const ingestion = new Ingestion({
+  const mailer = createMailer({ smtpUrl: env.SMTP_URL, from: env.MAIL_FROM, production: isProduction }, logger);
+  const payroll = createPayrollService({
     prisma,
-    source,
-    backfill,
-    watched,
-    alerter,
+    stellar: new HorizonGateway(env.HORIZON_URL),
     logger,
-    networkPassphrase: env.NETWORK_PASSPHRASE,
+    limits: DEFAULT_LIMITS,
+    mailer,
+    verifyEmail: false,
+    batchWindowSeconds: env.BATCH_WINDOW_SECONDS,
   });
-  const watchdog = new Watchdog({
-    ingestion,
-    source,
-    alerter,
-    logger,
-    onStale: () => {
-      logger.fatal("ingestion heartbeat stale; exiting for restart");
-      process.exit(1);
-    },
-  });
-  const listener = new PgListener({
-    connectionString: env.DATABASE_URL,
-    channels: [CHANNELS.walletsChanged],
-    onNotification: () => watched.markDirty(),
-    onConnect: () => watched.markDirty(),
-    logger,
-  });
-  await listener.start();
 
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info({ signal }, "worker shutting down after the current batch");
+    logger.info({ signal }, "worker shutting down after the current step");
     controller.abort();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
-  logger.info({ rpc: env.STELLAR_RPC_URL }, "worker started");
-  const mailer = createMailer({ smtpUrl: env.SMTP_URL, from: env.MAIL_FROM, production: isProduction }, logger);
+  logger.info({ horizon: env.HORIZON_URL }, "worker started");
   await Promise.all([
-    // Payment emails need a mail server; without one this loop is simply not started.
+    loop("confirmer", async () => (await confirmOpenBatches({ prisma, payroll, logger }), CONFIRM_INTERVAL_MS), true),
+    // Run emails need a mail server; without one this loop is simply not started.
     ...(mailer
-      ? [loop("notifier", async () => (await notifyPayments({ prisma, mailer, webOrigin: env.WEB_ORIGIN, logger }), NOTIFY_INTERVAL_MS), false)]
+      ? [loop("notifier", async () => (await notifyRuns({ prisma, mailer, webOrigin: env.WEB_ORIGIN, logger }), NOTIFY_INTERVAL_MS), false)]
       : []),
-    // 2 s between polls, none when the page was full.
-    loop("ingestion", async () => ((await ingestion.tick()).full ? 0 : POLL_MS), true),
-    loop("sweeper", async () => (await sweepExpired(prisma), SWEEP_INTERVAL_MS), false),
     loop("housekeeping", async () => (await pruneCounters(prisma), 10 * 60_000), false),
-    loop("reconciliation", async () => (await sleep(RECONCILE_INTERVAL_MS), controller.signal.aborted || (await reconcile(ingestion)), 0), false),
-    loop("watchdog", async () => (await watchdog.check(), WATCHDOG_INTERVAL_MS), false),
   ]);
 
-  await listener.stop();
   await prisma.$disconnect();
   logger.info("worker stopped");
 }

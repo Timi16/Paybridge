@@ -1,26 +1,19 @@
 import type { Wallet } from "@prisma/client";
-import { ASSET_CODES, type Wallet as WalletDto } from "@paybridge/shared";
+import type { Wallet as WalletDto } from "@paybridge/shared";
 import { StrKey } from "@stellar/stellar-sdk";
-import { CHANNELS, notify } from "../../db/notify";
 import type { AppDeps } from "../../deps";
-import { resolveAsset } from "../../lib/asset";
+import { usdc } from "../../lib/asset";
 import { AppError, notFound } from "../../lib/errors";
 import { randomNonce } from "../../lib/ids";
-import { checkCanReceive, parseTrustlines } from "./capability";
+import { findTrustline } from "../../stellar/checks";
 import * as repo from "./repo";
+import { parseTrustlines } from "./trustlines";
 import { verifyWalletSignature, type SignatureInput } from "./signature";
 
 const CHALLENGE_TTL_MS = 10 * 60_000;
 
 export function serializeWallet(w: Wallet): WalletDto {
-  const canReceive: WalletDto["canReceive"] = {};
-  for (const code of ASSET_CODES) {
-    // Amount 1 stroop: "can it receive this asset at all?"
-    const check = checkCanReceive(w, resolveAsset(code), 1n);
-    canReceive[code] = check.ok
-      ? { canReceive: true, reason: null }
-      : { canReceive: false, reason: check.reason };
-  }
+  const line = w.accountExists ? findTrustline(parseTrustlines(w.trustlines), usdc()) : undefined;
   return {
     id: w.id,
     address: w.address,
@@ -28,8 +21,9 @@ export function serializeWallet(w: Wallet): WalletDto {
     verified: w.verifiedAt !== null,
     verifiedAt: w.verifiedAt?.toISOString() ?? null,
     accountExists: w.accountExists,
-    trustlines: parseTrustlines(w.trustlines),
-    canReceive,
+    usdcBalance: line?.balance ?? null,
+    xlmBalance: w.accountExists ? w.nativeBalance : null,
+    hasUsdcTrustline: line !== undefined,
     checkedAt: w.checkedAt?.toISOString() ?? null,
     createdAt: w.createdAt.toISOString(),
   };
@@ -56,25 +50,19 @@ export function assertWalletAddress(address: string): void {
 }
 
 export function createWalletService(deps: AppDeps) {
-  const { prisma, accounts } = deps;
+  const { prisma, stellar } = deps;
   const inFlight = new Map<string, Promise<Wallet>>();
 
-  async function announce(wallet: Wallet): Promise<void> {
-    await notify(prisma, CHANNELS.walletsChanged, {
-      walletId: wallet.id,
-      merchantId: wallet.merchantId,
-    }).catch((err: unknown) => deps.logger.warn({ err }, "wallets_changed notify failed"));
-  }
-
-  /** Reads the account from Horizon and caches existence + trustlines on the wallet. */
+  /** Reads the account from Horizon and caches existence, balances and trustlines on the wallet. */
   function refresh(wallet: Wallet): Promise<Wallet> {
     const running = inFlight.get(wallet.id);
     if (running) return running; // one Horizon call per wallet at a time
     const task = (async () => {
-      const state = await accounts.load(wallet.address);
-      const updated = await repo.updateWallet(prisma, wallet.merchantId, wallet.id, {
+      const state = await stellar.loadAccount(wallet.address);
+      const updated = await repo.updateWallet(prisma, wallet.companyId, wallet.id, {
         accountExists: state.exists,
         trustlines: state.exists ? state.trustlines : [],
+        nativeBalance: state.exists ? state.nativeBalance : null,
         checkedAt: new Date(),
       });
       return updated ?? wallet;
@@ -83,114 +71,73 @@ export function createWalletService(deps: AppDeps) {
     return task;
   }
 
-  /**
-   * Returns the wallet with Horizon data no older than maxAgeMs. If Horizon is down, stale
-   * data is used when there is some; with none at all the error propagates.
-   */
-  async function ensureFresh(wallet: Wallet, maxAgeMs: number): Promise<Wallet> {
-    if (wallet.checkedAt && Date.now() - wallet.checkedAt.getTime() <= maxAgeMs) return wallet;
-    try {
-      return await refresh(wallet);
-    } catch (err) {
-      if (wallet.checkedAt) {
-        deps.logger.warn({ walletId: wallet.id }, "wallet check failed; using cached data");
-        return wallet;
-      }
-      throw err;
-    }
-  }
-
-  async function getOwned(merchantId: string, id: string): Promise<Wallet> {
-    const wallet = await repo.findWallet(prisma, merchantId, id);
+  async function getOwned(companyId: string, id: string): Promise<Wallet> {
+    const wallet = await repo.findWallet(prisma, companyId, id);
     if (!wallet) throw notFound("Wallet");
     return wallet;
   }
 
   return {
-    ensureFresh,
+    getOwned,
 
-    async list(merchantId: string): Promise<Wallet[]> {
-      return repo.listWallets(prisma, merchantId);
+    async list(companyId: string): Promise<Wallet[]> {
+      return repo.listWallets(prisma, companyId);
     },
 
     /**
-     * One ACTIVE wallet per address, decided under a per-address lock:
-     * - verified and active with another merchant, or removed but still owed open requests -> WALLET_TAKEN;
-     * - another merchant's unverified claim never blocks (nobody can squat on an address);
-     * - a verified wallet its owner removed, with no open requests left, is free again. The
-     *   new merchant gets a NEW row, so the old owner's requests and payments stay theirs.
+     * Adds a funding wallet. A wallet is the company's own business: adding someone else's
+     * address gains nothing, because every payment still needs that account's signature.
+     * Re-adding a removed address restores its row (and its ownership proof).
      */
-    async add(merchantId: string, input: { address: string; label?: string }): Promise<Wallet> {
+    async add(companyId: string, input: { address: string; label?: string }): Promise<Wallet> {
       assertWalletAddress(input.address);
-      const taken = () => new AppError("WALLET_TAKEN", "This wallet is already registered");
       const label = input.label ?? null;
       let wallet = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.address}))`;
-        const rows = await repo.findWalletsByAddress(tx, input.address);
-        const mine = rows.find((r) => r.merchantId === merchantId);
-        const others = rows.filter((r) => r.merchantId !== merchantId);
-        if (mine && mine.deletedAt === null) throw taken();
-        if (others.some((o) => o.deletedAt === null && o.verifiedAt)) throw taken();
-        if (others.length > 0 && (await repo.countOpenRequests(tx, others.map((o) => o.id))) > 0) {
-          throw taken();
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${companyId}:${input.address}`}))`;
+        const rows = await repo.findCompanyWalletsByAddress(tx, companyId, input.address);
+        if (rows.some((r) => r.deletedAt === null)) {
+          throw new AppError("WALLET_TAKEN", "This wallet is already added");
         }
-        const squatters = others.filter((o) => o.deletedAt === null); // all unverified
-
-        if (mine) {
-          // Re-adding a wallet this merchant removed: restore the row. Ownership stays
-          // proven unless someone else has verified the address since.
-          for (const s of squatters) await repo.retireUnverified(tx, s.id);
-          const verifiedElsewhere = others.some(
-            (o) => o.verifiedAt && (!mine.verifiedAt || o.verifiedAt > mine.verifiedAt),
-          );
-          const restored = await repo.updateWallet(tx, merchantId, mine.id, {
-            deletedAt: null,
-            label: label ?? mine.label,
-            verifiedAt: verifiedElsewhere ? null : mine.verifiedAt,
-          });
-          return restored ?? mine;
+        const removed = rows[0];
+        if (removed) {
+          const restored = await repo.updateWallet(tx, companyId, removed.id, { deletedAt: null, label: label ?? removed.label });
+          return restored ?? removed;
         }
-        // Unverified claims are retired, never transferred: a wallet row (and the payments
-        // recorded on it) stays with the merchant who created it.
-        for (const s of squatters) await repo.retireUnverified(tx, s.id);
-        return repo.createWallet(tx, merchantId, { address: input.address, label });
+        return repo.createWallet(tx, companyId, { address: input.address, label });
       });
       // Best effort: the wallet is still added if Horizon is unreachable right now.
       wallet = await refresh(wallet).catch(() => wallet);
-      await announce(wallet);
       return wallet;
     },
 
-    async refresh(merchantId: string, id: string): Promise<Wallet> {
-      const wallet = await refresh(await getOwned(merchantId, id));
-      await announce(wallet);
-      return wallet;
+    async refresh(companyId: string, id: string): Promise<Wallet> {
+      return refresh(await getOwned(companyId, id));
     },
 
-    async createChallenge(merchantId: string, id: string) {
-      const wallet = await getOwned(merchantId, id);
+    async createChallenge(companyId: string, id: string) {
+      const wallet = await getOwned(companyId, id);
       const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
       const message = [
         "PayBridge wallet verification",
-        `Merchant: ${merchantId}`,
+        `Company: ${companyId}`,
         `Wallet: ${wallet.address}`,
         `Nonce: ${randomNonce()}`,
         `Expires: ${expiresAt.toISOString()}`,
       ].join("\n");
       const challenge = await prisma.walletChallenge.create({
-        data: { merchantId, address: wallet.address, message, expiresAt },
+        data: { companyId, address: wallet.address, message, expiresAt },
       });
       return { challengeId: challenge.id, message, expiresAt: expiresAt.toISOString() };
     },
 
     async verify(
-      merchantId: string,
+      companyId: string,
       id: string,
       input: { challengeId: string; signature: SignatureInput },
     ): Promise<Wallet> {
-      const wallet = await getOwned(merchantId, id);
+      const wallet = await getOwned(companyId, id);
       const challenge = await prisma.walletChallenge.findFirst({
-        where: { id: input.challengeId, merchantId, address: wallet.address },
+        where: { id: input.challengeId, companyId, address: wallet.address },
       });
       if (!challenge) throw notFound("Challenge");
       if (challenge.usedAt || challenge.expiresAt.getTime() <= Date.now()) {
@@ -199,12 +146,7 @@ export function createWalletService(deps: AppDeps) {
       if (!verifyWalletSignature(wallet.address, challenge.message, input.signature)) {
         throw new AppError("INVALID_SIGNATURE", "The signature does not match this wallet");
       }
-      const verified = await prisma.$transaction(async (tx) => {
-        // Same per-address lock as add(): a verification and a competing claim on the same
-        // address are strictly ordered, so two merchants can never both end up holding it.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${wallet.address}))`;
-        // Another merchant may have claimed the address while this one was unverified.
-        if (!(await repo.findWallet(tx, merchantId, wallet.id))) throw notFound("Wallet");
+      return prisma.$transaction(async (tx) => {
         // Single use, enforced atomically: two concurrent verifies cannot both consume it.
         const used = await tx.walletChallenge.updateMany({
           where: { id: challenge.id, usedAt: null, expiresAt: { gt: new Date() } },
@@ -213,25 +155,19 @@ export function createWalletService(deps: AppDeps) {
         if (used.count === 0) {
           throw new AppError("CHALLENGE_EXPIRED", "This challenge has expired or was already used. Request a new one.");
         }
-        const updated = await repo.updateWallet(tx, merchantId, wallet.id, {
-          verifiedAt: wallet.verifiedAt ?? new Date(),
-        });
-        if (!updated) throw notFound("Wallet"); // rolls the challenge back too
+        const updated = await repo.updateWallet(tx, companyId, wallet.id, { verifiedAt: wallet.verifiedAt ?? new Date() });
+        if (!updated) throw notFound("Wallet");
         return updated;
       });
-      // Null means the wallet changed hands mid-verification; the transaction rolled nothing
-      // forward for this merchant.
-      if (!verified) throw notFound("Wallet");
-      await announce(verified);
-      return verified;
     },
 
-    /** Soft delete. The worker keeps watching it until its open requests close. */
-    async remove(merchantId: string, id: string): Promise<void> {
-      const wallet = await getOwned(merchantId, id);
-      await repo.updateWallet(prisma, merchantId, wallet.id, { deletedAt: new Date() });
-      await prisma.merchant.updateMany({ where: { id: merchantId, defaultWalletId: wallet.id }, data: { defaultWalletId: null } });
-      await announce(wallet);
+    /** Soft delete. Refused while a draft or a run being paid still uses it. */
+    async remove(companyId: string, id: string): Promise<void> {
+      const wallet = await getOwned(companyId, id);
+      if ((await repo.countOpenRuns(prisma, companyId, wallet.id)) > 0) {
+        throw new AppError("RUN_LOCKED", "A payroll run that is still open uses this wallet. Finish or cancel it first.");
+      }
+      await repo.updateWallet(prisma, companyId, wallet.id, { deletedAt: new Date() });
     },
   };
 }

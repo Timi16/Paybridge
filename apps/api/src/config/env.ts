@@ -12,7 +12,6 @@ export const EnvSchema = z.object({
   // directly, a client could forge X-Forwarded-For and dodge the per-IP rate limits.
   HOST: z.string().min(1).default("127.0.0.1"),
   DATABASE_URL: z.string().regex(/^postgres(ql)?:\/\//, "must be a postgresql:// URL"),
-  STELLAR_RPC_URL: url,
   HORIZON_URL: url,
   // Testnet only: PayBridge refuses to boot against any other network.
   NETWORK_PASSPHRASE: z.literal(TESTNET_PASSPHRASE, {
@@ -32,6 +31,8 @@ export const EnvSchema = z.object({
   // Sign-up email codes. auto = on when SMTP_URL is set. "on" without SMTP_URL only works in
   // development, where the code is printed in the API log.
   EMAIL_VERIFICATION: z.enum(["auto", "on", "off"]).default("auto"),
+  // How long a built batch can wait for the company's signature before it can no longer land.
+  BATCH_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
   ALERT_TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),
   ALERT_TELEGRAM_CHAT_ID: z.string().min(1).optional(),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),

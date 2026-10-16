@@ -19,27 +19,27 @@ import { createApiKeyService } from "./modules/apiKeys/service";
 import { authRoutes } from "./modules/auth/routes";
 import { createAuthService } from "./modules/auth/service";
 import { healthRoutes } from "./modules/health/routes";
-import { paymentRoutes } from "./modules/payments/routes";
-import { createPaymentService } from "./modules/payments/service";
-import { publicRoutes } from "./modules/public/routes";
-import { createPublicService } from "./modules/public/service";
-import { requestRoutes, summaryRoutes } from "./modules/requests/routes";
-import { createRequestService } from "./modules/requests/service";
-import { merchantStreamRoutes } from "./modules/stream/routes";
-import { SseRegistry } from "./modules/stream/sse";
+import { employeeRoutes } from "./modules/employees/routes";
+import { createEmployeeService } from "./modules/employees/service";
+import { groupRoutes } from "./modules/groups/routes";
+import { createGroupService } from "./modules/groups/service";
+import { payrollRoutes } from "./modules/payroll/routes";
+import { createPayrollService } from "./modules/payroll/service";
+import { summaryRoutes } from "./modules/summary/routes";
+import { createSummaryService } from "./modules/summary/service";
 import { walletRoutes } from "./modules/wallets/routes";
 import { createWalletService } from "./modules/wallets/service";
 import { buildOpenApiDocument } from "./openapi/registry";
 
 export interface BuiltApp {
   app: Express;
-  sse: SseRegistry;
 }
 
-export type BuildAppDeps = Omit<AppDeps, "limits" | "mailer" | "verifyEmail"> & {
+export type BuildAppDeps = Omit<AppDeps, "limits" | "mailer" | "verifyEmail" | "batchWindowSeconds"> & {
   limits?: Partial<Limits>;
   mailer?: Mailer | null;
   verifyEmail?: boolean;
+  batchWindowSeconds?: number;
 };
 
 /** Wires everything in a fixed order. Tests import this same function. */
@@ -51,9 +51,9 @@ export function buildApp(input: BuildAppDeps): BuiltApp {
     // Confirmation needs a way to deliver the code.
     verifyEmail: Boolean(input.verifyEmail) && mailer !== null,
     limits: { ...DEFAULT_LIMITS, ...input.limits },
+    batchWindowSeconds: input.batchWindowSeconds ?? 300,
   };
   const { limits, prisma } = deps;
-  const sse = new SseRegistry();
   const app = express();
 
   // 1. Behind Caddy: trust exactly one proxy hop so req.ip is the real client.
@@ -103,16 +103,18 @@ export function buildApp(input: BuildAppDeps): BuiltApp {
   const openCors = cors({ origin: "*", methods: ["GET"], exposedHeaders: ["X-Request-Id", "Retry-After"] });
   app.use("/auth", credentialedCors);
   app.use("/v1", credentialedCors);
-  app.use(["/public", "/health", "/openapi.json"], openCors);
+  app.use(["/health", "/openapi.json"], openCors);
 
   // 6. Body parsing.
-  app.use(express.json({ limit: "50kb" }));
+  const smallJson = express.json({ limit: "50kb" });
+  // Bulk employee import is the one route that takes a bigger body.
+  const importJson = express.json({ limit: "200kb" });
+  app.use((req, res, next) => (req.method === "POST" && req.path === "/v1/employees/import" ? importJson : smallJson)(req, res, next));
   app.use(cookieParser());
   app.use(rejectNulBytes);
 
   // 7. Routes.
   const walletService = createWalletService(deps);
-  const requestService = createRequestService(deps, walletService);
 
   app.use("/health", healthRoutes(deps));
 
@@ -147,12 +149,6 @@ export function buildApp(input: BuildAppDeps): BuiltApp {
   );
 
   app.use(
-    "/public",
-    limiter({ limit: limits.publicPerMin }),
-    publicRoutes(deps, createPublicService(deps, walletService), sse),
-  );
-
-  app.use(
     "/auth",
     requireOrigin,
     authRoutes(createAuthService(deps), {
@@ -168,18 +164,18 @@ export function buildApp(input: BuildAppDeps): BuiltApp {
   v1.use(requireAny(prisma));
   v1.use(requireOrigin);
   v1.use(requireVerifiedEmail);
-  v1.use(limiter({ limit: limits.v1PerMin, key: (req) => `merchant:${authOf(req).merchantId}` }));
+  v1.use(limiter({ limit: limits.v1PerMin, key: (req) => `company:${authOf(req).companyId}` }));
   v1.use("/api-keys", sessionOnly, apiKeyRoutes(createApiKeyService(deps)));
   v1.use("/wallets", sessionOnly, walletRoutes(walletService));
-  v1.use("/stream", sessionOnly, merchantStreamRoutes(deps, sse));
-  v1.use("/payment-requests", requestRoutes(requestService, prisma));
-  v1.use("/summary", summaryRoutes(requestService));
-  v1.use("/payments", paymentRoutes(createPaymentService(deps), prisma));
+  v1.use("/groups", groupRoutes(createGroupService(deps)));
+  v1.use("/employees", employeeRoutes(createEmployeeService(deps)));
+  v1.use("/payroll-runs", payrollRoutes(createPayrollService(deps)));
+  v1.use("/summary", summaryRoutes(createSummaryService(deps)));
   app.use("/v1", v1);
 
   // 8. 404, then the error handler.
   app.use(notFoundHandler);
   app.use(errorHandler);
 
-  return { app, sse };
+  return { app };
 }

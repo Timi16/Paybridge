@@ -1,19 +1,18 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { Account, Asset, Keypair, Memo, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Keypair, Networks, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import { EnvSchema, loadEnv } from "../../src/config/env";
-import { decodeHorizonOp } from "../../src/engine/sources/horizonBackfill";
-import { RpcEventSource } from "../../src/engine/sources/rpcEventSource";
-import { sep7Uri } from "../../src/modules/public/service";
-import { refundDue, refundOwed } from "../../src/modules/requests/serialize";
-import { ALLOWED, canTransition } from "../../src/modules/transitions";
-import { checkCanReceive } from "../../src/modules/wallets/capability";
+import { batchMemo, buildBatchTransaction, checkSignedBatch } from "../../src/modules/payroll/batches";
+import { lineFailure } from "../../src/modules/payroll/settle";
+import { BATCH_ALLOWED, ITEM_ALLOWED, RUN_ALLOWED } from "../../src/modules/payroll/transitions";
 import { decodeSignature, verifyWalletSignature } from "../../src/modules/wallets/signature";
 import { assertWalletAddress } from "../../src/modules/wallets/service";
-import { rawEvent } from "../helpers/events";
-import { usdcTrustline, USDC_ISSUER } from "../helpers/fakes";
-import { silentLogger } from "../helpers/harness";
+import { fundingCheck, receiveProblem } from "../../src/stellar/checks";
+import type { AccountState } from "../../src/stellar/gateway";
+import { decodeResultXdr } from "../../src/stellar/results";
+import { REDACT_PATHS } from "../../src/lib/logger";
+import { resultXdr, usdcTrustline, USDC_ISSUER } from "../helpers/fakes";
 
 const SEP53_VECTOR = {
   address: "GCFIRY65OQE7DFP5KLNS2PF2LVZMUZYJX4OZIEQ36N2IQANUB5XVYOJR", // seed = 32 x 0x01
@@ -23,7 +22,6 @@ const SEP53_VECTOR = {
 
 const validEnv = {
   DATABASE_URL: "postgresql://u:p@localhost:5432/db",
-  STELLAR_RPC_URL: "https://soroban-testnet.stellar.org",
   HORIZON_URL: "https://horizon-testnet.stellar.org",
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
   USDC_ISSUER,
@@ -33,10 +31,10 @@ const validEnv = {
 
 describe("config/env", () => {
   it("accepts a valid testnet configuration and applies defaults", () => {
-    expect(loadEnv(validEnv)).toMatchObject({ PORT: 4200, NODE_ENV: "development", LOG_LEVEL: "info" });
+    expect(loadEnv(validEnv)).toMatchObject({ PORT: 4200, NODE_ENV: "development", LOG_LEVEL: "info", BATCH_WINDOW_SECONDS: 300 });
   });
 
-  it("refuses to boot on any network but testnet", () => {
+  it("S4: refuses to boot on any network but testnet", () => {
     expect(() => loadEnv({ ...validEnv, NETWORK_PASSPHRASE: Networks.PUBLIC })).toThrow(/testnet passphrase/);
   });
 
@@ -52,49 +50,6 @@ describe("config/env", () => {
     const example = readFileSync(resolve(__dirname, "../../../../.env.example"), "utf8");
     const listed = [...example.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]).sort();
     expect(listed).toEqual(Object.keys(EnvSchema.shape).sort());
-  });
-});
-
-describe("transitions table", () => {
-  it("PAID, OVERPAID and NETWORK_RESET are final; EXPIRED and CANCELLED can only become PAID (merchant Accept)", () => {
-    for (const s of ["PAID", "OVERPAID", "NETWORK_RESET"] as const) expect(ALLOWED[s]).toEqual([]);
-    expect(ALLOWED.EXPIRED).toEqual(["PAID"]);
-    expect(ALLOWED.CANCELLED).toEqual(["PAID"]);
-  });
-
-  it("allows only the documented moves", () => {
-    expect(canTransition("PENDING", "OVERPAID")).toBe(true);
-    expect(canTransition("PENDING", "CANCELLED")).toBe(true);
-    expect(canTransition("UNDERPAID", "CANCELLED")).toBe(false);
-    expect(canTransition("UNDERPAID", "UNDERPAID")).toBe(false);
-    expect(canTransition("EXPIRED", "PAID")).toBe(true);
-    expect(canTransition("EXPIRED", "PENDING")).toBe(false);
-    expect(canTransition("PAID", "EXPIRED")).toBe(false);
-    expect(canTransition("CANCELLED", "PAID")).toBe(true);
-    expect(canTransition("CANCELLED", "PENDING")).toBe(false);
-  });
-
-  it("T3: refund flag is set for overpayments and for closed requests that received money", () => {
-    const usdc = { assetCode: "USDC", assetIssuer: USDC_ISSUER, amountStroops: 500_000_000n };
-    const total = (lines: ReturnType<typeof refundDue>) => lines.map((l) => `${l.asset.code}:${l.amountStroops}`);
-    expect(total(refundDue({ ...usdc, status: "OVERPAID", receivedStroops: 600_000_000n }))).toEqual(["USDC:100000000"]);
-    expect(total(refundDue({ ...usdc, status: "EXPIRED", receivedStroops: 200_000_000n }))).toEqual(["USDC:200000000"]);
-    expect(refundDue({ ...usdc, status: "EXPIRED", receivedStroops: 0n })).toEqual([]);
-    expect(refundDue({ ...usdc, status: "PAID", receivedStroops: 500_000_000n })).toEqual([]);
-    expect(refundDue({ ...usdc, status: "UNDERPAID", receivedStroops: 200_000_000n })).toEqual([]);
-    // Accepted late payments adding up to more than was asked: PAID, the excess is owed back.
-    expect(total(refundDue({ ...usdc, status: "PAID", receivedStroops: 650_000_000n }))).toEqual(["USDC:150000000"]);
-    // Unapplied payments are owed back in the asset they came in; counted and pre-reset ones are not.
-    const pay = (outcome: "DUPLICATE" | "WRONG_ASSET" | "COUNTED" | "LATE", amount: bigint, xlm = false, eventId = "e") =>
-      ({ eventId, outcome, assetCode: xlm ? "XLM" : "USDC", assetIssuer: xlm ? null : USDC_ISSUER, amountStroops: amount });
-    const lines = refundDue({ ...usdc, status: "PAID", receivedStroops: 500_000_000n }, [
-      pay("DUPLICATE", 500_000_000n), pay("DUPLICATE", 10n), pay("WRONG_ASSET", 70n, true), pay("COUNTED", 500_000_000n), pay("LATE", 9n, false, "reset-1-e"),
-    ]);
-    expect(total(lines).sort()).toEqual(["USDC:500000010", "XLM:70"]);
-    // The flag ignores dust: a stranger's one-stroop payment cannot raise it.
-    expect(refundOwed(lines)).toBe(true);
-    expect(refundOwed(refundDue({ ...usdc, status: "PAID", receivedStroops: 500_000_000n }, [pay("WRONG_ASSET", 1n, true), pay("DUPLICATE", 99_999n)]))).toBe(false);
-    expect(refundOwed(refundDue({ ...usdc, status: "PAID", receivedStroops: 500_000_000n }, [pay("DUPLICATE", 100_000n)]))).toBe(true);
   });
 });
 
@@ -120,7 +75,7 @@ describe("wallet signature (SEP-53)", () => {
 });
 
 describe("wallet address rules", () => {
-  it("M1: refuses secrets, muxed and invalid addresses without echoing them", () => {
+  it("E1: refuses secrets, muxed and invalid addresses without echoing them", () => {
     const kp = Keypair.random();
     expect(() => assertWalletAddress(kp.publicKey())).not.toThrow();
     try {
@@ -135,167 +90,128 @@ describe("wallet address rules", () => {
   });
 });
 
-describe("can the wallet receive?", () => {
+describe("status tables", () => {
+  it("PAID and CANCELLED runs are final; PARTIAL and FAILED can only go back to PAYING (retry)", () => {
+    expect(RUN_ALLOWED.PAID).toEqual([]);
+    expect(RUN_ALLOWED.CANCELLED).toEqual([]);
+    expect(RUN_ALLOWED.PARTIAL).toEqual(["PAYING"]);
+    expect(RUN_ALLOWED.FAILED).toEqual(["PAYING"]);
+    expect(RUN_ALLOWED.DRAFT).toEqual(["PAYING", "CANCELLED"]);
+  });
+
+  it("R13: a PAID line never changes again; only FAILED lines can be retried", () => {
+    expect(ITEM_ALLOWED.PAID).toEqual([]);
+    expect(ITEM_ALLOWED.CANCELLED).toEqual([]);
+    expect(ITEM_ALLOWED.FAILED).toEqual(["PENDING"]);
+    // Nothing goes straight from PENDING to PAID: a line is only paid through a batch.
+    expect(ITEM_ALLOWED.PENDING).not.toContain("PAID");
+    for (const final of ["CONFIRMED", "FAILED", "EXPIRED"] as const) expect(BATCH_ALLOWED[final]).toEqual([]);
+  });
+});
+
+describe("Stellar results", () => {
+  it("R9: decodes per-operation codes from a result XDR the way Horizon reports them", () => {
+    expect(decodeResultXdr(resultXdr(false, ["op_success", "op_no_trust", "op_line_full"]))).toEqual({
+      txCode: "tx_failed",
+      opCodes: ["op_success", "op_no_trust", "op_line_full"],
+    });
+    expect(decodeResultXdr(resultXdr(true, ["op_success"]))).toEqual({ txCode: "tx_success", opCodes: ["op_success"] });
+  });
+
+  it("R9: only recipient-side codes fail a line; the rest were simply not sent", () => {
+    expect(lineFailure("op_no_trust")).toBe("NO_TRUSTLINE");
+    expect(lineFailure("op_no_destination")).toBe("ACCOUNT_NOT_FOUND");
+    expect(lineFailure("op_not_authorized")).toBe("NOT_AUTHORIZED");
+    expect(lineFailure("op_line_full")).toBe("TRUSTLINE_LIMIT_TOO_LOW");
+    expect(lineFailure("op_malformed")).toBe("PAYMENT_FAILED");
+    for (const code of ["op_success", "op_underfunded", "op_src_no_trust", undefined]) expect(lineFailure(code)).toBeNull();
+  });
+});
+
+describe("checks", () => {
   const usdc = { code: "USDC", issuer: USDC_ISSUER };
-  it("M2: a missing account can receive nothing", () => {
-    expect(checkCanReceive({ accountExists: false, trustlines: [] }, { code: "XLM", issuer: null }, 1n)).toEqual({ ok: false, reason: "ACCOUNT_NOT_FOUND" });
-  });
-  it("M3: no (or unauthorised) trustline", () => {
-    expect(checkCanReceive({ accountExists: true, trustlines: [] }, usdc, 1n)).toEqual({ ok: false, reason: "NO_TRUSTLINE" });
-    expect(checkCanReceive({ accountExists: true, trustlines: [usdcTrustline({ authorized: false })] }, usdc, 1n)).toEqual({ ok: false, reason: "NO_TRUSTLINE" });
-    expect(checkCanReceive({ accountExists: true, trustlines: [usdcTrustline({ issuer: "GAGVZMODPYFTULIVSY3RGFADIC5LF4LLSN37N4MFWGNZ57TYBXL2LQQX" })] }, usdc, 1n)).toEqual({ ok: false, reason: "NO_TRUSTLINE" });
-    expect(checkCanReceive({ accountExists: true, trustlines: [] }, { code: "XLM", issuer: null }, 1n)).toEqual({ ok: true });
-  });
-  it("M4: headroom is limit - balance - buying liabilities, to the stroop", () => {
-    const line = usdcTrustline({ limit: "100.0000000", balance: "40.0000000", buyingLiabilities: "10.0000000" });
-    const wallet = { accountExists: true, trustlines: [line] };
-    expect(checkCanReceive(wallet, usdc, 500_000_000n)).toEqual({ ok: true });
-    expect(checkCanReceive(wallet, usdc, 500_000_001n)).toEqual({ ok: false, reason: "TRUSTLINE_LIMIT_TOO_LOW" });
-  });
-});
-
-describe("sep7", () => {
-  it("builds a pay URI with memo and asset; XLM has no asset params", () => {
-    const base = { walletAddress: "GAS2RJQFMPHEDEG4MLQGNRIVHCXFXG7IEVFC2RNPHG7WXRIZNZVDIUAC", memo: "PB7K2M9QXA", amountStroops: 500_000_000n };
-    const usdc = sep7Uri({ ...base, assetCode: "USDC", assetIssuer: USDC_ISSUER });
-    expect(usdc).toBe(
-      "web+stellar:pay?destination=GAS2RJQFMPHEDEG4MLQGNRIVHCXFXG7IEVFC2RNPHG7WXRIZNZVDIUAC&amount=50.0000000&asset_code=USDC" +
-        `&asset_issuer=${USDC_ISSUER}&memo=PB7K2M9QXA&memo_type=MEMO_TEXT&network_passphrase=Test%20SDF%20Network%20%3B%20September%202015`,
-    );
-    expect(sep7Uri({ ...base, assetCode: "XLM", assetIssuer: null })).not.toContain("asset_code");
-  });
-});
-
-describe("horizon backfill decoding", () => {
-  const WALLET = "GAS2RJQFMPHEDEG4MLQGNRIVHCXFXG7IEVFC2RNPHG7WXRIZNZVDIUAC";
-  const op = {
-    id: "21582008798941185",
-    paging_token: "21582008798941185",
-    type: "payment",
-    created_at: "2026-10-04T21:12:32Z",
-    transaction_hash: "aa".repeat(32),
-    transaction_successful: true,
-    from: "GAE6HVGQRXFG5BVAAVZBKP44U6JMFHYVDRAVGADJFHBSVS6RX7PETWFV",
-    to: WALLET,
-    amount: "50.0000000",
-    asset_type: "credit_alphanum4",
-    asset_code: "USDC",
-    asset_issuer: USDC_ISSUER,
-    transaction: { hash: "aa".repeat(32), successful: true, memo_type: "text", memo: "PB7K2M9QXA" },
-  };
-
-  it("decodes a payment with its memo, ledger and amount", () => {
-    expect(decodeHorizonOp(op, WALLET)).toEqual([
-      expect.objectContaining({
-        eventId: "hz-21582008798941185-0",
-        ledger: 5024953,
-        amountStroops: 500_000_000n,
-        memoType: "text",
-        memoRaw: "PB7K2M9QXA",
-        source: "horizon",
-        assetIssuer: USDC_ISSUER,
-      }),
-    ]);
+  const account = (over: Partial<Extract<AccountState, { exists: true }>> = {}): AccountState => ({
+    exists: true,
+    sequence: "1",
+    nativeBalance: "10.0000000",
+    nativeSellingLiabilities: "0.0000000",
+    subentries: 1,
+    sponsoring: 0,
+    sponsored: 0,
+    trustlines: [usdcTrustline()],
+    ...over,
   });
 
-  it("P16: a muxed destination wins over the memo; P19: failed transactions are skipped", () => {
-    expect(decodeHorizonOp({ ...op, to_muxed_id: "42" }, WALLET)[0]).toMatchObject({ memoType: "id", toMuxedId: "42" });
-    expect(decodeHorizonOp({ ...op, transaction_successful: false }, WALLET)).toEqual([]);
-    expect(decodeHorizonOp({ ...op, to: "GAE6HVGQRXFG5BVAAVZBKP44U6JMFHYVDRAVGADJFHBSVS6RX7PETWFV" }, WALLET)).toEqual([]);
+  it("E6: missing account, no trustline (or another issuer's USDC), unauthorised, limit too low", () => {
+    expect(receiveProblem({ exists: false }, usdc, 1n)).toBe("ACCOUNT_NOT_FOUND");
+    expect(receiveProblem(account({ trustlines: [] }), usdc, 1n)).toBe("NO_TRUSTLINE");
+    expect(receiveProblem(account({ trustlines: [usdcTrustline({ issuer: Keypair.random().publicKey() })] }), usdc, 1n)).toBe("NO_TRUSTLINE");
+    expect(receiveProblem(account({ trustlines: [usdcTrustline({ authorized: false })] }), usdc, 1n)).toBe("NOT_AUTHORIZED");
+    // Headroom is limit - balance - buying liabilities, to the stroop.
+    const line = usdcTrustline({ limit: "100.0000000", balance: "60.0000000", buyingLiabilities: "10.0000000" });
+    expect(receiveProblem(account({ trustlines: [line] }), usdc, 300_000_000n)).toBeNull();
+    expect(receiveProblem(account({ trustlines: [line] }), usdc, 300_000_001n)).toBe("TRUSTLINE_LIMIT_TOO_LOW");
   });
 
-  it("P20: fee-bump transactions keep both hashes", () => {
-    const tx = { ...op.transaction, hash: "bb".repeat(32), fee_bump_transaction: { hash: "bb".repeat(32) }, inner_transaction: { hash: "cc".repeat(32) } };
-    expect(decodeHorizonOp({ ...op, transaction: tx }, WALLET)[0]).toMatchObject({ txHash: "bb".repeat(32), innerTxHash: "cc".repeat(32) });
+  it("R4: USDC available is balance minus selling liabilities; XLM must cover fees above the reserve", () => {
+    const funded = account({ trustlines: [usdcTrustline({ balance: "1000.0000000", sellingLiabilities: "100.0000000" })] });
+    expect(fundingCheck(funded, usdc, 9_000_000_000n, 3)).toMatchObject({ problem: null, usdcAvailable: 9_000_000_000n, feeStroops: 3000n });
+    expect(fundingCheck(funded, usdc, 9_000_000_001n, 3)).toMatchObject({ problem: "INSUFFICIENT_USDC", shortBy: 1n });
+    // Reserve for 1 subentry is (2 + 1) x 0.5 = 1.5 XLM; 1.5001 XLM covers one 1000-stroop fee only.
+    const thin = account({ nativeBalance: "1.5001000", trustlines: funded.exists ? funded.trustlines : [] });
+    expect(fundingCheck(thin, usdc, 1n, 1).problem).toBeNull();
+    expect(fundingCheck(thin, usdc, 1n, 2).problem).toBe("INSUFFICIENT_XLM");
+    expect(fundingCheck({ exists: false }, usdc, 1n, 1).problem).toBe("ACCOUNT_NOT_FOUND");
+    expect(fundingCheck(account({ trustlines: [] }), usdc, 1n, 1).problem).toBe("NO_TRUSTLINE");
+    // A balance Horizon sent that can't be read never passes as enough.
+    expect(() => fundingCheck(account({ trustlines: [usdcTrustline({ balance: "lots" })] }), usdc, 1n, 1)).toThrow();
   });
 });
 
-describe("RpcEventSource", () => {
-  const WALLET = "GAS2RJQFMPHEDEG4MLQGNRIVHCXFXG7IEVFC2RNPHG7WXRIZNZVDIUAC";
-  const USDC = `USDC:${USDC_ISSUER}`;
-  const kp = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1));
+describe("batches", () => {
+  const source = Keypair.random();
+  const build = () =>
+    buildBatchTransaction({
+      source: source.publicKey(),
+      accountSequence: "41",
+      asset: { code: "USDC", issuer: USDC_ISSUER },
+      lines: [
+        { destination: Keypair.random().publicKey(), amountStroops: 1n },
+        { destination: Keypair.random().publicKey(), amountStroops: 15_005_000_000n },
+      ],
+      memo: batchMemo(12345),
+      maxTime: new Date("2026-10-16T12:05:00Z"),
+    });
 
-  function envelope(opts: { memo?: string; feeBump?: boolean }) {
-    const builder = new TransactionBuilder(new Account(kp.publicKey(), "1"), { fee: "100", networkPassphrase: Networks.TESTNET })
-      .addOperation(Operation.payment({ destination: WALLET, asset: Asset.native(), amount: "1" }))
-      .setTimeout(0);
-    if (opts.memo) builder.addMemo(Memo.text(opts.memo));
-    const tx = builder.build();
-    tx.sign(kp);
-    const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
-    if (!opts.feeBump) return { xdr: tx.toXDR(), outer: hex(tx.hash()), inner: null as string | null };
-    const fb = TransactionBuilder.buildFeeBumpTransaction(kp, "200", tx, Networks.TESTNET);
-    return { xdr: fb.toXDR(), outer: hex(fb.hash()), inner: hex(tx.hash()) };
-  }
-
-  function sourceWith(events: ReturnType<typeof rawEvent>[], txs: Record<string, string>, extra: Record<string, unknown> = {}) {
-    const source = new RpcEventSource({ rpcUrl: "http://127.0.0.1:1", networkPassphrase: Networks.TESTNET, logger: silentLogger });
-    const calls = { getTransaction: 0 };
-    (source as unknown as { server: unknown }).server = {
-      _getEvents: async () => ({ events, cursor: "0021474840625152000-4294967295", latestLedger: 5_000_001, latestLedgerCloseTime: "1791148537", oldestLedger: 1, oldestLedgerCloseTime: "1", ...extra }),
-      _getTransaction: async (hash: string) => {
-        calls.getTransaction++;
-        return txs[hash] ? { status: "SUCCESS", envelopeXdr: txs[hash] } : { status: "NOT_FOUND" };
-      },
-      _getLedgers: async () => ({ ledgers: [{ ledgerCloseTime: "1791148000" }] }),
-    };
-    return { source, calls };
-  }
-  const all = () => true;
-
-  it("P20: a fee-bump transaction stores the outer and the inner hash", async () => {
-    const env = envelope({ memo: "PB7K2M9QXA", feeBump: true });
-    const ev = rawEvent({ to: WALLET, asset: USDC, amount: 5n, muxed: { text: "PB7K2M9QXA" }, txHash: env.inner as string });
-    const { source } = sourceWith([ev], { [env.inner as string]: env.xdr });
-    const res = await source.fetch({ startLedger: 1, limit: 200, isWatched: all });
-    expect(res.payments[0]).toMatchObject({ txHash: env.outer, innerTxHash: env.inner, memoRaw: "PB7K2M9QXA" });
+  it("R6: one exact payment per line, the next sequence, the memo and the timebound", () => {
+    const built = build();
+    const tx = TransactionBuilder.fromXDR(built.xdr, Networks.TESTNET) as Transaction;
+    expect(built.sequence).toBe("42");
+    expect(tx.operations.map((o) => (o.type === "payment" ? o.amount : null))).toEqual(["0.0000001", "1500.5000000"]);
+    expect(Buffer.from(tx.memo.value as Uint8Array).toString()).toBe("PayBridge payroll #12345");
+    expect(tx.timeBounds?.maxTime).toBe(String(Date.parse("2026-10-16T12:05:00Z") / 1000));
+    expect(Buffer.from(tx.hash()).toString("hex")).toBe(built.hash);
+    expect(Buffer.byteLength(batchMemo(999999999))).toBeLessThanOrEqual(28);
   });
 
-  it("P15: a contract-wallet transfer has no memo in the event, so the transaction memo is used", async () => {
-    const env = envelope({ memo: "PB7K2M9QXA" });
-    const ev = rawEvent({ from: "CAYPAQDKNWMHRATKU5DQ327VDHVRSIVK7UGVWT2A5SUZCUFTLUHXH2JA", to: WALLET, asset: USDC, amount: 5n, txHash: env.outer });
-    const { source } = sourceWith([ev], { [env.outer]: env.xdr });
-    const res = await source.fetch({ startLedger: 1, limit: 200, isWatched: all });
-    expect(res.payments[0]).toMatchObject({ memoType: "text", memoRaw: "PB7K2M9QXA", innerTxHash: null, txHash: env.outer });
+  it("R7: a signed batch must be ours and signed by the funding wallet", () => {
+    const built = build();
+    const tx = TransactionBuilder.fromXDR(built.xdr, Networks.TESTNET);
+    expect(() => checkSignedBatch(tx.toXDR(), { hash: built.hash, source: source.publicKey() })).toThrow(/not signed/);
+    tx.sign(source);
+    expect(() => checkSignedBatch(tx.toXDR(), { hash: built.hash, source: source.publicKey() })).not.toThrow();
+    expect(() => checkSignedBatch(tx.toXDR(), { hash: "00".repeat(32), source: source.publicKey() })).toThrow(/not the transaction/);
+    // Signatures don't change the hash, so a second signer is fine, and a wrong one alone is not.
+    const other = TransactionBuilder.fromXDR(built.xdr, Networks.TESTNET);
+    other.sign(Keypair.random());
+    expect(() => checkSignedBatch(other.toXDR(), { hash: built.hash, source: source.publicKey() })).toThrow(/not signed/);
   });
+});
 
-  it("only looks up transactions for watched wallets, caches hits but not misses, and survives a missing transaction", async () => {
-    const env = envelope({});
-    const mine = rawEvent({ to: WALLET, asset: USDC, amount: 5n, txHash: env.outer });
-    const other = rawEvent({ to: Keypair.random().publicKey(), asset: USDC, amount: 5n, txHash: "ff".repeat(32) });
-    // A memo-less event whose transaction RPC no longer has, from a ledger long past.
-    const gone = rawEvent({ to: WALLET, asset: "native", amount: 7n, txHash: "ee".repeat(32), ledger: 4_000_000, id: "0017179869184000000-0000000000" });
-    const { source, calls } = sourceWith([mine, other, gone], { [env.outer]: env.xdr });
-    const res = await source.fetch({ startLedger: 1, limit: 200, isWatched: (a) => a === WALLET });
-    expect(res.payments).toHaveLength(2);
-    expect(res.payments[1]).toMatchObject({ memoType: "none", amountStroops: 7n });
-    await source.fetch({ startLedger: 1, limit: 200, isWatched: (a) => a === WALLET });
-    // Second pass: the found transaction is served from the cache; the missing one is looked
-    // up again (a miss is never cached, it may just not be indexed yet).
-    expect(calls.getTransaction).toBe(3);
-  });
-
-  it("P15: a recent memo-less event whose transaction is not readable yet fails the batch instead of becoming NO_MEMO", async () => {
-    const pending = rawEvent({ to: WALLET, asset: USDC, amount: 5n, txHash: "dd".repeat(32) }); // ledger 5,000,000; tip 5,000,001
-    const { source } = sourceWith([pending], {});
-    await expect(source.fetch({ startLedger: 1, limit: 200, isWatched: all })).rejects.toThrow(/not available from RPC yet/);
-    // With its memo already in the event there is nothing to wait for.
-    const withMemo = rawEvent({ to: WALLET, asset: USDC, amount: 5n, txHash: "dd".repeat(32), muxed: { text: "PB7K2M9QXA" } });
-    const res = await sourceWith([withMemo], {}).source.fetch({ startLedger: 1, limit: 200, isWatched: all });
-    expect(res.payments[0]).toMatchObject({ memoRaw: "PB7K2M9QXA", innerTxHash: null });
-  });
-
-  it("T5: reports the last fully processed ledger conservatively", async () => {
-    const e1 = rawEvent({ to: WALLET, asset: USDC, amount: 5n, ledger: 4_999_998, id: "a" });
-    const e2 = rawEvent({ to: WALLET, asset: USDC, amount: 5n, ledger: 5_000_000, id: "b" });
-    // Full page: the last event's ledger may have more events, so only the one before counts.
-    const full = await sourceWith([e1, e2], {}).source.fetch({ startLedger: 1, limit: 2, isWatched: () => false });
-    expect(full).toMatchObject({ full: true, processedThrough: { ledger: 4_999_999 } });
-    // Short page: everything up to the ledger named by the cursor (capped at the tip).
-    const short = await sourceWith([e1], {}).source.fetch({ startLedger: 1, limit: 200, isWatched: () => false });
-    expect(short.full).toBe(false);
-    expect(short.processedThrough?.ledger).toBe(5_000_000);
-    const atTip = await sourceWith([], {}, { cursor: "0021474844920119295-4294967295" }).source.fetch({ startLedger: 1, limit: 200, isWatched: () => false });
-    expect(atTip.processedThrough).toEqual({ ledger: 5_000_001, closedAt: new Date(1791148537 * 1000) });
+describe("logging", () => {
+  it("redacts signed transactions, passwords, keys, tokens and signatures", () => {
+    for (const path of ["*.signedXdr", "*.password", "*.key", "*.token", "*.signature", "req.headers.authorization", "req.headers.cookie"]) {
+      expect(REDACT_PATHS).toContain(path);
+    }
   });
 });

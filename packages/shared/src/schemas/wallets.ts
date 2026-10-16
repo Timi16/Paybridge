@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CANNOT_RECEIVE_REASONS, IdSchema } from "./common";
+import { IdSchema } from "./common";
 
 export const AddWalletBody = z
   .object({
@@ -32,15 +32,12 @@ export const TrustlineSchema = z.object({
   limit: z.string(),
   balance: z.string(),
   buyingLiabilities: z.string(),
+  sellingLiabilities: z.string().default("0"),
   authorized: z.boolean(),
 });
 export type Trustline = z.infer<typeof TrustlineSchema>;
 
-export const ReceiveCheckSchema = z.object({
-  canReceive: z.boolean(),
-  reason: z.enum(CANNOT_RECEIVE_REASONS).nullable(),
-});
-
+/** A funding wallet: the Stellar account payroll is paid from. */
 export const WalletSchema = z.object({
   id: z.string(),
   address: z.string(),
@@ -48,8 +45,11 @@ export const WalletSchema = z.object({
   verified: z.boolean(),
   verifiedAt: z.string().nullable(),
   accountExists: z.boolean(),
-  trustlines: z.array(TrustlineSchema),
-  canReceive: z.record(ReceiveCheckSchema),
+  /** USDC (configured issuer) balance as last checked; null when there is no trustline. */
+  usdcBalance: z.string().nullable(),
+  /** XLM balance as last checked; null when the account does not exist. */
+  xlmBalance: z.string().nullable(),
+  hasUsdcTrustline: z.boolean(),
   checkedAt: z.string().nullable(),
   createdAt: z.string(),
 });

@@ -1,13 +1,12 @@
-import type { Merchant, Session } from "@prisma/client";
-import type { Merchant as MerchantDto, Session as SessionDto, UpdateSettingsBody } from "@paybridge/shared";
+import type { Company, Session } from "@prisma/client";
+import type { Company as CompanyDto, Session as SessionDto, UpdateSettingsBody } from "@paybridge/shared";
 import argon2 from "argon2";
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { uniqueViolation } from "../../db/prisma";
 import type { AppDeps } from "../../deps";
 import { AppError } from "../../lib/errors";
 import { generateSessionToken, hashSessionToken } from "../../lib/ids";
-import { CHANNELS, notify } from "../../db/notify";
-import { lockRequestById, transitionRequest } from "../transitions";
+import { finishIfDone, lockRun, recordEvent, transitionItems, transitionRun } from "../payroll/transitions";
 import * as repo from "./repo";
 import { ACCOUNT_RULE, accountKey, LoginThrottle, PAIR_RULE, pairKey, passwordChangeKey } from "./throttle";
 
@@ -28,23 +27,14 @@ export interface ClientInfo {
   userAgent: string | null;
 }
 
-export function serializeMerchant(m: Merchant): MerchantDto {
+export function serializeCompany(m: Company): CompanyDto {
   return {
     id: m.id,
     email: m.email,
     emailVerified: m.emailVerifiedAt !== null,
     businessName: m.businessName,
-    supportContact: m.supportContact,
-    website: m.website,
-    brandColor: m.brandColor,
-    defaultAsset: m.defaultAsset,
-    acceptedAssets: m.acceptedAssets as MerchantDto["acceptedAssets"],
-    toleranceBps: m.toleranceBps,
     notifyPaid: m.notifyPaid,
     notifyProblems: m.notifyProblems,
-    defaultWalletId: m.defaultWalletId,
-    defaultExpiryMinutes: m.defaultExpiryMinutes,
-    autoMatchByAmount: m.autoMatchByAmount,
     createdAt: m.createdAt.toISOString(),
   };
 }
@@ -67,9 +57,9 @@ export function createAuthService(deps: AppDeps) {
   // Verified against when the email is unknown, so both failure paths cost the same time.
   const dummyHash = argon2.hash("paybridge-dummy-password", ARGON_OPTIONS);
 
-  async function startSession(merchantId: string, client: ClientInfo, ttlMs = SESSION_TTL_MS): Promise<string> {
+  async function startSession(companyId: string, client: ClientInfo, ttlMs = SESSION_TTL_MS): Promise<string> {
     const token = generateSessionToken();
-    await repo.createSession(prisma, merchantId, {
+    await repo.createSession(prisma, companyId, {
       id: hashSessionToken(token),
       expiresAt: new Date(Date.now() + ttlMs),
       ip: client.ip,
@@ -82,24 +72,24 @@ export function createAuthService(deps: AppDeps) {
     if (deviceToken.length > 128) return false;
     const device = await prisma.trustedDevice.findUnique({
       where: { id: hashSessionToken(deviceToken) },
-      select: { merchant: { select: { email: true } } },
+      select: { company: { select: { email: true } } },
     });
-    return device?.merchant.email === email;
+    return device?.company.email === email;
   }
 
   /** Marks this browser as one that has logged in to the account; returns its cookie token. */
-  async function trustDevice(merchantId: string, existingToken: string | null): Promise<string> {
+  async function trustDevice(companyId: string, existingToken: string | null): Promise<string> {
     if (existingToken) {
       await prisma.trustedDevice.updateMany({
-        where: { id: hashSessionToken(existingToken), merchantId },
+        where: { id: hashSessionToken(existingToken), companyId },
         data: { lastUsedAt: new Date() },
       });
       return existingToken;
     }
     const token = generateSessionToken();
-    await prisma.trustedDevice.create({ data: { id: hashSessionToken(token), merchantId } });
+    await prisma.trustedDevice.create({ data: { id: hashSessionToken(token), companyId } });
     const stale = await prisma.trustedDevice.findMany({
-      where: { merchantId },
+      where: { companyId },
       orderBy: { lastUsedAt: "desc" },
       skip: MAX_DEVICES,
       select: { id: true },
@@ -110,19 +100,19 @@ export function createAuthService(deps: AppDeps) {
     return token;
   }
 
-  const hashCode = (merchantId: string, code: string) => hashSessionToken(`email-code:${merchantId}:${code}`);
+  const hashCode = (companyId: string, code: string) => hashSessionToken(`email-code:${companyId}:${code}`);
 
   /** Makes a new six-digit code (replacing any earlier one) and emails it. */
-  async function sendCode(merchant: Merchant): Promise<void> {
+  async function sendCode(company: Company): Promise<void> {
     if (!deps.mailer) throw new AppError("SERVICE_UNAVAILABLE", "Email isn't set up on this server yet");
     const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
-    const data = { codeHash: hashCode(merchant.id, code), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, sentAt: new Date() };
-    await prisma.emailVerification.upsert({ where: { merchantId: merchant.id }, create: { merchantId: merchant.id, ...data }, update: data });
+    const data = { codeHash: hashCode(company.id, code), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, sentAt: new Date() };
+    await prisma.emailVerification.upsert({ where: { companyId: company.id }, create: { companyId: company.id, ...data }, update: data });
     await deps.mailer.send({
-      to: merchant.email,
+      to: company.email,
       subject: `${code} is your PayBridge code`,
       text: [
-        `Hi ${merchant.businessName},`,
+        `Hi ${company.businessName},`,
         "",
         `Your PayBridge confirmation code is: ${code}`,
         "",
@@ -132,75 +122,80 @@ export function createAuthService(deps: AppDeps) {
   }
 
   return {
-    async updateSettings(merchantId: string, input: UpdateSettingsBody): Promise<Merchant> {
-      if (input.defaultWalletId) {
-        const wallet = await prisma.wallet.findFirst({
-          where: { id: input.defaultWalletId, merchantId, deletedAt: null },
-          select: { id: true },
-        });
-        if (!wallet) throw new AppError("NOT_FOUND", "Wallet not found");
-      }
-      const merchant = await prisma.merchant.update({ where: { id: merchantId }, data: input });
-      if (input.autoMatchByAmount !== undefined) {
-        // The worker caches this flag with its watched wallets; tell it to reload.
-        await notify(prisma, CHANNELS.walletsChanged, { walletId: "", merchantId }).catch(() => undefined);
-      }
-      return merchant;
+    async updateSettings(companyId: string, input: UpdateSettingsBody): Promise<Company> {
+      return prisma.company.update({ where: { id: companyId }, data: input });
     },
 
     /**
-     * Closes the account. Open requests are closed (pending -> cancelled, part-paid -> expired),
-     * sessions and API keys are revoked, wallets are released. Wallets and their funds were
-     * never PayBridge's, so nothing on-chain changes. The email becomes free to use again.
+     * Closes the account after re-checking the password. Drafts are cancelled and payments not
+     * yet sent are cancelled; refused while a batch is waiting for a signature or for Stellar.
+     * Sessions and API keys are revoked. Wallets and their funds were never PayBridge's, so
+     * nothing on-chain changes. The email becomes free to use again.
      */
-    async closeAccount(merchantId: string): Promise<void> {
+    async closeAccount(companyId: string, password: string): Promise<void> {
+      const company = await repo.findCompany(prisma, companyId);
+      if (!company) throw new AppError("UNAUTHENTICATED", "Authentication required");
+      const key = passwordChangeKey(companyId);
+      await throttle.assertAllowed([key]);
+      const ok = await argon2.verify(company.passwordHash, password).catch(() => false);
+      if (!ok) {
+        await throttle.recordFailure(key, PAIR_RULE);
+        throw new AppError("INVALID_CREDENTIALS", "Password is incorrect");
+      }
+      await throttle.clear([key]);
       await prisma.$transaction(
         async (tx) => {
-          const open = await tx.paymentRequest.findMany({
-            where: { merchantId, status: { in: ["PENDING", "UNDERPAID"] } },
+          const open = await tx.payrollRun.findMany({
+            where: { companyId, status: { in: ["DRAFT", "PAYING"] } },
             select: { id: true },
             orderBy: { id: "asc" },
           });
           for (const { id } of open) {
-            const req = await lockRequestById(tx, id);
-            if (!req) continue;
-            if (req.status === "PENDING") {
-              await transitionRequest(tx, id, "PENDING", "CANCELLED", "cancelled", "merchant", { data: { cancelledAt: new Date() } });
-            } else if (req.status === "UNDERPAID") {
-              await transitionRequest(tx, id, "UNDERPAID", "EXPIRED", "expired", "merchant");
+            const run = await lockRun(tx, companyId, id);
+            if (!run) continue;
+            const busy = await tx.payrollBatch.count({ where: { runId: id, status: { in: ["AWAITING_SIGNATURE", "SUBMITTED"] } } });
+            if (busy > 0) {
+              throw new AppError("RUN_LOCKED", `Payroll #${run.number} has a batch waiting for a signature or for Stellar. Let it finish, then close the account.`);
+            }
+            const pending = await tx.payrollItem.findMany({ where: { runId: id, status: "PENDING" }, select: { id: true } });
+            await transitionItems(tx, id, pending.map((p) => p.id), "PENDING", "CANCELLED");
+            if (run.status === "DRAFT") {
+              await transitionRun(tx, run, "CANCELLED", "company", { data: { finishedAt: new Date() }, event: { type: "cancelled", message: "Cancelled: account closed" } });
+            } else {
+              await recordEvent(tx, id, "company", { type: "cancelled", message: "Account closed: payments not yet sent were cancelled" });
+              await finishIfDone(tx, id, "company");
             }
           }
           const now = new Date();
-          await tx.session.deleteMany({ where: { merchantId } });
-          await tx.trustedDevice.deleteMany({ where: { merchantId } });
-          await tx.apiKey.updateMany({ where: { merchantId, revokedAt: null }, data: { revokedAt: now } });
-          await tx.wallet.updateMany({ where: { merchantId, deletedAt: null }, data: { deletedAt: now } });
-          await tx.merchant.update({
-            where: { id: merchantId },
-            data: { closedAt: now, email: `closed-${merchantId}@closed.invalid`, defaultWalletId: null, notifyPaid: false, notifyProblems: false },
+          await tx.session.deleteMany({ where: { companyId } });
+          await tx.trustedDevice.deleteMany({ where: { companyId } });
+          await tx.apiKey.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: now } });
+          await tx.wallet.updateMany({ where: { companyId, deletedAt: null }, data: { deletedAt: now } });
+          await tx.company.update({
+            where: { id: companyId },
+            data: { closedAt: now, email: `closed-${companyId}@closed.invalid`, notifyPaid: false, notifyProblems: false },
           });
-          await notify(tx, CHANNELS.walletsChanged, { walletId: "", merchantId });
         },
         { timeout: 60_000 },
       );
     },
 
-    listSessions(merchantId: string): Promise<Session[]> {
+    listSessions(companyId: string): Promise<Session[]> {
       return prisma.session.findMany({
-        where: { merchantId, expiresAt: { gt: new Date() } },
+        where: { companyId, expiresAt: { gt: new Date() } },
         orderBy: { createdAt: "desc" },
         take: 50,
       });
     },
 
-    /** Signs one of the merchant's other sessions out. Returns false if it is not theirs. */
-    async revokeSession(merchantId: string, sessionId: string): Promise<boolean> {
-      const deleted = await prisma.session.deleteMany({ where: { id: sessionId, merchantId } });
+    /** Signs one of the company's other sessions out. Returns false if it is not theirs. */
+    async revokeSession(companyId: string, sessionId: string): Promise<boolean> {
+      const deleted = await prisma.session.deleteMany({ where: { id: sessionId, companyId } });
       return deleted.count > 0;
     },
 
-    async revokeOtherSessions(merchantId: string, keepSessionId: string): Promise<void> {
-      await repo.deleteOtherSessions(prisma, merchantId, keepSessionId);
+    async revokeOtherSessions(companyId: string, keepSessionId: string): Promise<void> {
+      await repo.deleteOtherSessions(prisma, companyId, keepSessionId);
     },
 
     /**
@@ -211,25 +206,25 @@ export function createAuthService(deps: AppDeps) {
       if (!deps.mailer) {
         throw new AppError("SERVICE_UNAVAILABLE", "Password reset by email isn't set up on this server yet");
       }
-      const merchant = await repo.findMerchantByEmail(prisma, email);
-      if (!merchant) return;
+      const company = await repo.findCompanyByEmail(prisma, email);
+      if (!company) return;
       const latest = await prisma.passwordReset.findFirst({
-        where: { merchantId: merchant.id },
+        where: { companyId: company.id },
         orderBy: { createdAt: "desc" },
       });
       // One email a minute per account, however many times the form is submitted.
       if (latest && Date.now() - latest.createdAt.getTime() < RESET_COOLDOWN_MS) return;
       const token = generateSessionToken();
       await prisma.passwordReset.create({
-        data: { id: hashSessionToken(token), merchantId: merchant.id, expiresAt: new Date(Date.now() + RESET_TTL_MS) },
+        data: { id: hashSessionToken(token), companyId: company.id, expiresAt: new Date(Date.now() + RESET_TTL_MS) },
       });
       const link = `${webOrigin}/reset-password?token=${token}`;
       await deps.mailer
         .send({
-          to: merchant.email,
+          to: company.email,
           subject: "Reset your PayBridge password",
           text: [
-            `Hi ${merchant.businessName},`,
+            `Hi ${company.businessName},`,
             "",
             "Use this link to choose a new PayBridge password. It works once, for one hour:",
             link,
@@ -240,7 +235,7 @@ export function createAuthService(deps: AppDeps) {
         .catch((err: unknown) => deps.logger.error({ err }, "password reset email failed to send"));
     },
 
-    /** Sets a new password from an emailed link and signs the merchant out everywhere. */
+    /** Sets a new password from an emailed link and signs the company out everywhere. */
     async resetPassword(token: string, newPassword: string): Promise<void> {
       const id = hashSessionToken(token);
       const passwordHash = await argon2.hash(newPassword, ARGON_OPTIONS);
@@ -254,21 +249,21 @@ export function createAuthService(deps: AppDeps) {
           throw new AppError("CHALLENGE_EXPIRED", "This reset link has expired or was already used. Ask for a new one.");
         }
         const reset = await tx.passwordReset.findUniqueOrThrow({ where: { id } });
-        const merchant = await tx.merchant.update({ where: { id: reset.merchantId }, data: { passwordHash } });
-        await tx.session.deleteMany({ where: { merchantId: reset.merchantId } });
-        await tx.passwordReset.deleteMany({ where: { merchantId: reset.merchantId, id: { not: id } } });
-        await tx.loginThrottle.deleteMany({ where: { key: accountKey(merchant.email) } });
+        const company = await tx.company.update({ where: { id: reset.companyId }, data: { passwordHash } });
+        await tx.session.deleteMany({ where: { companyId: reset.companyId } });
+        await tx.passwordReset.deleteMany({ where: { companyId: reset.companyId, id: { not: id } } });
+        await tx.loginThrottle.deleteMany({ where: { key: accountKey(company.email) } });
       });
     },
 
     async signup(
       input: { email: string; password: string; businessName: string },
       client: ClientInfo,
-    ): Promise<{ merchant: Merchant; token: string; deviceToken: string }> {
+    ): Promise<{ company: Company; token: string; deviceToken: string }> {
       const passwordHash = await argon2.hash(input.password, ARGON_OPTIONS);
-      let merchant: Merchant;
+      let company: Company;
       try {
-        merchant = await prisma.merchant.create({
+        company = await prisma.company.create({
           data: {
             email: input.email,
             passwordHash,
@@ -284,53 +279,53 @@ export function createAuthService(deps: AppDeps) {
         throw err;
       }
       // The account exists even if this email fails to go out; the code can be sent again.
-      if (deps.verifyEmail) await sendCode(merchant).catch((err: unknown) => deps.logger.error({ err }, "sign-up code email failed"));
+      if (deps.verifyEmail) await sendCode(company).catch((err: unknown) => deps.logger.error({ err }, "sign-up code email failed"));
       return {
-        merchant,
-        token: await startSession(merchant.id, client),
-        deviceToken: await trustDevice(merchant.id, null),
+        company,
+        token: await startSession(company.id, client),
+        deviceToken: await trustDevice(company.id, null),
       };
     },
 
     /** Sends a fresh code, at most once a minute. A confirmed account gets nothing. */
-    async resendEmailCode(merchantId: string): Promise<void> {
-      const merchant = await repo.findMerchant(prisma, merchantId);
-      if (!merchant) throw new AppError("UNAUTHENTICATED", "Authentication required");
-      if (merchant.emailVerifiedAt) return;
-      const current = await prisma.emailVerification.findUnique({ where: { merchantId } });
+    async resendEmailCode(companyId: string): Promise<void> {
+      const company = await repo.findCompany(prisma, companyId);
+      if (!company) throw new AppError("UNAUTHENTICATED", "Authentication required");
+      if (company.emailVerifiedAt) return;
+      const current = await prisma.emailVerification.findUnique({ where: { companyId } });
       const wait = current ? CODE_COOLDOWN_MS - (Date.now() - current.sentAt.getTime()) : 0;
       if (wait > 0) {
         throw new AppError("RATE_LIMITED", "A code was just sent. Give it a minute before asking again.", { retryAfter: Math.ceil(wait / 1000) });
       }
-      await sendCode(merchant);
+      await sendCode(company);
     },
 
     /**
      * Confirms the email with the six-digit code. A code lasts 15 minutes and allows five
      * wrong guesses; after that a new one must be sent, so the code cannot be brute-forced.
      */
-    async verifyEmail(merchantId: string, code: string): Promise<Merchant> {
-      const merchant = await repo.findMerchant(prisma, merchantId);
-      if (!merchant) throw new AppError("UNAUTHENTICATED", "Authentication required");
-      if (merchant.emailVerifiedAt) return merchant;
+    async verifyEmail(companyId: string, code: string): Promise<Company> {
+      const company = await repo.findCompany(prisma, companyId);
+      if (!company) throw new AppError("UNAUTHENTICATED", "Authentication required");
+      if (company.emailVerifiedAt) return company;
       const expired = () => new AppError("CHALLENGE_EXPIRED", "This code has expired. Send a new one.");
       // Count the attempt first, atomically, so parallel guesses cannot exceed the limit.
       const counted = await prisma.emailVerification.updateMany({
-        where: { merchantId, expiresAt: { gt: new Date() }, attempts: { lt: CODE_MAX_ATTEMPTS } },
+        where: { companyId, expiresAt: { gt: new Date() }, attempts: { lt: CODE_MAX_ATTEMPTS } },
         data: { attempts: { increment: 1 } },
       });
       if (counted.count === 0) throw expired();
-      const row = await prisma.emailVerification.findUnique({ where: { merchantId } });
+      const row = await prisma.emailVerification.findUnique({ where: { companyId } });
       if (!row) throw expired();
-      const given = Buffer.from(hashCode(merchantId, code), "hex");
+      const given = Buffer.from(hashCode(companyId, code), "hex");
       const wanted = Buffer.from(row.codeHash, "hex");
       if (given.length !== wanted.length || !timingSafeEqual(given, wanted)) {
         const left = CODE_MAX_ATTEMPTS - row.attempts;
         throw new AppError("INVALID_CODE", left > 0 ? `That code isn't right. ${left} ${left === 1 ? "try" : "tries"} left.` : "That code isn't right. Send a new one.");
       }
       const [updated] = await prisma.$transaction([
-        prisma.merchant.update({ where: { id: merchantId }, data: { emailVerifiedAt: new Date() } }),
-        prisma.emailVerification.deleteMany({ where: { merchantId } }),
+        prisma.company.update({ where: { id: companyId }, data: { emailVerifiedAt: new Date() } }),
+        prisma.emailVerification.deleteMany({ where: { companyId } }),
       ]);
       return updated;
     },
@@ -345,7 +340,7 @@ export function createAuthService(deps: AppDeps) {
       oldToken: string | null,
       deviceToken: string | null,
       remember = true,
-    ): Promise<{ merchant: Merchant; token: string; deviceToken: string }> {
+    ): Promise<{ company: Company; token: string; deviceToken: string }> {
       const pair = pairKey(input.email, client.ip);
       const account = accountKey(input.email);
       // A browser that has logged in to this account before is not subject to the
@@ -353,10 +348,10 @@ export function createAuthService(deps: AppDeps) {
       const trusted = deviceToken ? await isTrustedDevice(deviceToken, input.email) : false;
       await throttle.assertAllowed(trusted ? [pair] : [pair, account]);
 
-      const merchant = await repo.findMerchantByEmail(prisma, input.email);
-      const hash = merchant?.passwordHash ?? (await dummyHash);
+      const company = await repo.findCompanyByEmail(prisma, input.email);
+      const hash = company?.passwordHash ?? (await dummyHash);
       const ok = await argon2.verify(hash, input.password).catch(() => false);
-      if (!merchant || !ok) {
+      if (!company || !ok) {
         await throttle.recordFailure(pair, PAIR_RULE);
         await throttle.recordFailure(account, ACCOUNT_RULE);
         // Same error whether the email or the password was wrong.
@@ -364,11 +359,11 @@ export function createAuthService(deps: AppDeps) {
       }
       await throttle.clear([pair, account]);
       if (oldToken) await repo.deleteSession(prisma, hashSessionToken(oldToken));
-      await repo.deleteExpiredSessions(prisma, merchant.id);
+      await repo.deleteExpiredSessions(prisma, company.id);
       return {
-        merchant,
-        token: await startSession(merchant.id, client, remember ? SESSION_TTL_MS : SHORT_SESSION_TTL_MS),
-        deviceToken: await trustDevice(merchant.id, trusted ? deviceToken : null),
+        company,
+        token: await startSession(company.id, client, remember ? SESSION_TTL_MS : SHORT_SESSION_TTL_MS),
+        deviceToken: await trustDevice(company.id, trusted ? deviceToken : null),
       };
     },
 
@@ -376,23 +371,23 @@ export function createAuthService(deps: AppDeps) {
       await repo.deleteSession(prisma, sessionId);
     },
 
-    async me(merchantId: string): Promise<Merchant> {
-      const merchant = await repo.findMerchant(prisma, merchantId);
-      if (!merchant) throw new AppError("UNAUTHENTICATED", "Authentication required");
-      return merchant;
+    async me(companyId: string): Promise<Company> {
+      const company = await repo.findCompany(prisma, companyId);
+      if (!company) throw new AppError("UNAUTHENTICATED", "Authentication required");
+      return company;
     },
 
     async changePassword(
-      merchantId: string,
+      companyId: string,
       sessionId: string,
       input: { currentPassword: string; newPassword: string },
     ): Promise<void> {
-      const merchant = await repo.findMerchant(prisma, merchantId);
-      if (!merchant) throw new AppError("UNAUTHENTICATED", "Authentication required");
-      // Keyed by the signed-in merchant: only they can trip it, and it cannot block logins.
-      const key = passwordChangeKey(merchantId);
+      const company = await repo.findCompany(prisma, companyId);
+      if (!company) throw new AppError("UNAUTHENTICATED", "Authentication required");
+      // Keyed by the signed-in company: only they can trip it, and it cannot block logins.
+      const key = passwordChangeKey(companyId);
       await throttle.assertAllowed([key]);
-      const ok = await argon2.verify(merchant.passwordHash, input.currentPassword).catch(() => false);
+      const ok = await argon2.verify(company.passwordHash, input.currentPassword).catch(() => false);
       if (!ok) {
         await throttle.recordFailure(key, PAIR_RULE);
         throw new AppError("INVALID_CREDENTIALS", "Current password is incorrect");
@@ -400,8 +395,8 @@ export function createAuthService(deps: AppDeps) {
       await throttle.clear([key]);
       const passwordHash = await argon2.hash(input.newPassword, ARGON_OPTIONS);
       await prisma.$transaction([
-        prisma.merchant.update({ where: { id: merchantId }, data: { passwordHash } }),
-        prisma.session.deleteMany({ where: { merchantId, id: { not: sessionId } } }),
+        prisma.company.update({ where: { id: companyId }, data: { passwordHash } }),
+        prisma.session.deleteMany({ where: { companyId, id: { not: sessionId } } }),
       ]);
     },
   };

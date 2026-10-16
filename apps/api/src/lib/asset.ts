@@ -1,13 +1,11 @@
-import type { AssetCode } from "@paybridge/shared";
 import { env } from "../config/env";
 
 export interface AssetRef {
   code: string;
-  /** null = native XLM */
-  issuer: string | null;
+  issuer: string;
 }
 
-/** The only assets a request can ask for, with the issuer PayBridge trusts for each. */
-export function resolveAsset(code: AssetCode): AssetRef {
-  return code === "XLM" ? { code: "XLM", issuer: null } : { code: "USDC", issuer: env.USDC_ISSUER };
+/** Payroll is paid in USDC from the issuer PayBridge is configured to trust. */
+export function usdc(): AssetRef {
+  return { code: "USDC", issuer: env.USDC_ISSUER };
 }

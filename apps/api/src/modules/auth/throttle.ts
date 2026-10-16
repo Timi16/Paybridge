@@ -13,10 +13,10 @@ export const pairKey = (email: string, ip: string | null) => `p:${email}|${ip ??
 /**
  * The account as a whole, across all IPs. Locks only after 20 failures in an hour, and never
  * applies to a browser that has logged in to this account before (a trusted device), so an
- * attacker who knows the email cannot lock the merchant out of their own dashboard.
+ * attacker who knows the email cannot lock the company out of their own dashboard.
  */
 export const accountKey = (email: string) => `e:${email}`;
-export const passwordChangeKey = (merchantId: string) => `pw:${merchantId}`;
+export const passwordChangeKey = (companyId: string) => `pw:${companyId}`;
 
 /**
  * Growing delay after failed logins, on top of the per-IP rate limit. Stored in Postgres so

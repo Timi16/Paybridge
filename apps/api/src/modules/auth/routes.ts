@@ -15,7 +15,7 @@ import { env, isProduction } from "../../config/env";
 import { notFound } from "../../lib/errors";
 import { authOf, SESSION_COOKIE } from "../../middleware/auth";
 import { parse } from "../../middleware/validate";
-import { DEVICE_TTL_MS, serializeMerchant, serializeSession, SESSION_TTL_MS, type AuthService } from "./service";
+import { DEVICE_TTL_MS, serializeCompany, serializeSession, SESSION_TTL_MS, type AuthService } from "./service";
 
 const cookieOptions: CookieOptions = {
   httpOnly: true,
@@ -49,15 +49,15 @@ export function authRoutes(service: AuthService, guards: AuthRouteGuards): Route
 
   router.post("/signup", guards.credentialLimiter, async (req, res) => {
     const body = parse(SignupBody, req.body);
-    const { merchant, token, deviceToken } = await service.signup(body, clientOf(req));
+    const { company, token, deviceToken } = await service.signup(body, clientOf(req));
     res.cookie(SESSION_COOKIE, token, { ...cookieOptions, maxAge: SESSION_TTL_MS });
     res.cookie(DEVICE_COOKIE, deviceToken, deviceCookieOptions);
-    res.status(201).json({ merchant: serializeMerchant(merchant) });
+    res.status(201).json({ company: serializeCompany(company) });
   });
 
   router.post("/login", guards.credentialLimiter, async (req, res) => {
     const body = parse(LoginBody, req.body);
-    const { merchant, token, deviceToken } = await service.login(
+    const { company, token, deviceToken } = await service.login(
       body,
       clientOf(req),
       cookieOf(req, SESSION_COOKIE),
@@ -67,7 +67,7 @@ export function authRoutes(service: AuthService, guards: AuthRouteGuards): Route
     // Not remembered: no max-age, so the cookie goes when the browser closes.
     res.cookie(SESSION_COOKIE, token, body.remember === false ? cookieOptions : { ...cookieOptions, maxAge: SESSION_TTL_MS });
     res.cookie(DEVICE_COOKIE, deviceToken, deviceCookieOptions);
-    res.json({ merchant: serializeMerchant(merchant) });
+    res.json({ company: serializeCompany(company) });
   });
 
   router.post("/logout", guards.readLimiter, guards.requireSession, async (req, res) => {
@@ -78,50 +78,50 @@ export function authRoutes(service: AuthService, guards: AuthRouteGuards): Route
   });
 
   router.get("/me", guards.readLimiter, guards.requireSession, async (req, res) => {
-    const merchant = await service.me(authOf(req).merchantId);
-    res.json({ merchant: serializeMerchant(merchant) });
+    const company = await service.me(authOf(req).companyId);
+    res.json({ company: serializeCompany(company) });
   });
 
   router.post("/settings", guards.readLimiter, guards.requireSession, async (req, res) => {
     const body = parse(UpdateSettingsBody, req.body);
-    const merchant = await service.updateSettings(authOf(req).merchantId, body);
-    res.json({ merchant: serializeMerchant(merchant) });
+    const company = await service.updateSettings(authOf(req).companyId, body);
+    res.json({ company: serializeCompany(company) });
   });
 
   router.post("/email/verify", guards.credentialLimiter, guards.requireSession, async (req, res) => {
     const { code } = parse(VerifyEmailBody, req.body);
-    const merchant = await service.verifyEmail(authOf(req).merchantId, code);
-    res.json({ merchant: serializeMerchant(merchant) });
+    const company = await service.verifyEmail(authOf(req).companyId, code);
+    res.json({ company: serializeCompany(company) });
   });
 
   router.post("/email/resend", guards.credentialLimiter, guards.requireSession, async (req, res) => {
-    await service.resendEmailCode(authOf(req).merchantId);
+    await service.resendEmailCode(authOf(req).companyId);
     res.status(204).end();
   });
 
   router.post("/close", guards.credentialLimiter, guards.requireSession, async (req, res) => {
-    parse(CloseAccountBody, req.body);
-    await service.closeAccount(authOf(req).merchantId);
+    const body = parse(CloseAccountBody, req.body);
+    await service.closeAccount(authOf(req).companyId, body.password);
     res.clearCookie(SESSION_COOKIE, cookieOptions);
     res.status(204).end();
   });
 
   router.get("/sessions", guards.readLimiter, guards.requireSession, async (req, res) => {
     const auth = authOf(req);
-    const sessions = await service.listSessions(auth.merchantId);
+    const sessions = await service.listSessions(auth.companyId);
     res.json({ data: sessions.map((s) => serializeSession(s, auth.sessionId ?? "")) });
   });
 
   router.post("/sessions/logout-others", guards.readLimiter, guards.requireSession, async (req, res) => {
     const auth = authOf(req);
-    await service.revokeOtherSessions(auth.merchantId, auth.sessionId ?? "");
+    await service.revokeOtherSessions(auth.companyId, auth.sessionId ?? "");
     res.status(204).end();
   });
 
   router.delete("/sessions/:id", guards.readLimiter, guards.requireSession, async (req, res) => {
     const auth = authOf(req);
     const { id } = parse(SessionIdParamsSchema, req.params);
-    if (!(await service.revokeSession(auth.merchantId, id))) throw notFound("Session");
+    if (!(await service.revokeSession(auth.companyId, id))) throw notFound("Session");
     if (id === auth.sessionId) res.clearCookie(SESSION_COOKIE, cookieOptions);
     res.status(204).end();
   });
@@ -142,7 +142,7 @@ export function authRoutes(service: AuthService, guards: AuthRouteGuards): Route
   router.post("/password", guards.credentialLimiter, guards.requireSession, async (req, res) => {
     const auth = authOf(req);
     const body = parse(ChangePasswordBody, req.body);
-    await service.changePassword(auth.merchantId, auth.sessionId ?? "", body);
+    await service.changePassword(auth.companyId, auth.sessionId ?? "", body);
     res.status(204).end();
   });
 
