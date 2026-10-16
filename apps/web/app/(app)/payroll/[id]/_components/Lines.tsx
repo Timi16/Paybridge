@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSWRConfig } from "swr";
 import { CopyButton } from "@/components/CopyButton";
 import { Icon } from "@/components/Icon";
@@ -101,6 +101,23 @@ export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) =
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
+  // Lines whose status just changed to Paid or Not sent glow once, so a live update is noticed.
+  const previous = useRef<Map<string, ItemStatus> | null>(null);
+  const [fresh, setFresh] = useState<Map<string, "just-paid" | "just-failed">>(new Map());
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = new Map(run.items.map((i) => [i.id, i.status]));
+    if (!before) return; // first render: nothing "just" changed
+    const changed = new Map<string, "just-paid" | "just-failed">();
+    for (const i of run.items) {
+      const was = before.get(i.id);
+      if (was && was !== i.status && (i.status === "PAID" || i.status === "FAILED")) changed.set(i.id, i.status === "PAID" ? "just-paid" : "just-failed");
+    }
+    if (changed.size === 0) return;
+    setFresh(changed);
+    const t = setTimeout(() => setFresh(new Map()), 2400);
+    return () => clearTimeout(t);
+  }, [run.items]);
   // Lines in a batch nobody has signed yet are not "sending": they wait for the company's signature.
   const unsigned = new Set(run.batches.filter((b) => b.status === "AWAITING_SIGNATURE").map((b) => b.number));
   const draft = run.status === "DRAFT";
@@ -163,7 +180,7 @@ export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) =
             </thead>
             <tbody>
               {shown.map((item) => (
-                <tr key={item.id}>
+                <tr key={item.id} className={fresh.get(item.id)}>
                   <td className="idx hide-sm">{String(item.position).padStart(2, "0")}</td>
                   <td>
                     <span className="who">

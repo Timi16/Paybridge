@@ -12,6 +12,8 @@ import { BatchStatusPill, RunStatusPill } from "@/components/StatusPill";
 import { useToast } from "@/components/Toast";
 import { api, errorMessage } from "@/lib/api";
 import { explorerAccount, explorerTx } from "@/lib/config";
+import { CountUpAmount } from "@/components/motion/CountUp";
+import { Seal } from "@/components/payroll/Seal";
 import { countdown, formatAmount, formatDateTime, formatDay, shortAddress, shortHash, sumAmounts } from "@/lib/format";
 import { useNow } from "@/lib/hooks";
 import { REASON_FIX } from "@/lib/payroll";
@@ -189,7 +191,7 @@ function Totals({ run }: { run: Run }) {
         )}
       </div>
       <div className="money total-rule" style={{ fontSize: "clamp(36px, 6vw, 56px)", textAlign: "right" }} aria-label={`Total ${formatAmount(run.total)} USDC`}>
-        {formatAmount(run.total)}
+        <CountUpAmount value={run.total} />
         <span className="unit">USDC</span>
       </div>
     </div>
@@ -257,6 +259,7 @@ function RunView({ run }: { run: Run }) {
       </nav>
 
       <article className="sheet stub" aria-labelledby="run-title">
+        <Seal key={run.status} status={run.status} date={run.finishedAt} />
         <div className="run-head">
           <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
             <span className="eyebrow">Payroll · Run #{String(run.number).padStart(4, "0")}</span>

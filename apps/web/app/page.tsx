@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
 import { Logo } from "@/components/Logo";
+import { Reveal } from "@/components/motion/Reveal";
+import { Words } from "@/components/motion/Words";
 import { HeroRun } from "./_landing/HeroRun";
 import { StickyHeader } from "./_landing/StickyHeader";
 import styles from "./_landing/landing.module.css";
@@ -85,9 +87,11 @@ export default function LandingPage() {
           <div className="stagger">
             <span className="eyebrow">Payroll in USDC · on Stellar</span>
             <h1 className={styles.heroTitle}>
-              Pay everyone.
+              <Words text="Pay everyone." />
               <br />
-              <em>Sign once.</em>
+              <em>
+                <Words text="Sign once." start={2} />
+              </em>
             </h1>
             <p className={styles.heroSub}>
               Add your team and their Stellar wallets, set this month&apos;s amounts, and approve one transaction in Freighter. PayBridge sends USDC to everyone and keeps every
@@ -108,7 +112,7 @@ export default function LandingPage() {
               <li>Free on Testnet</li>
             </ul>
           </div>
-          <div>
+          <div className={styles.heroDemo}>
             <HeroRun />
             <p className="faint" style={{ fontSize: 12, marginTop: 12, textAlign: "center" }}>
               Illustration. Names, amounts and hashes are examples.
@@ -119,16 +123,18 @@ export default function LandingPage() {
         <section id="how" className={styles.band}>
           <div className={styles.wrap}>
             <span className="eyebrow">How it works</span>
+            <Reveal>
             <h2 className={styles.sectionTitle}>
               From spreadsheet to <em>paid</em>, in three steps.
             </h2>
+            </Reveal>
             <ol className={styles.steps}>
               {STEPS.map((s, i) => (
-                <li key={s.title} className={styles.step}>
+                <Reveal as="li" key={s.title} className={styles.step} delay={i * 120}>
                   <span className={styles.stepNum}>0{i + 1}</span>
                   <h3>{s.title}</h3>
                   <p>{s.text}</p>
-                </li>
+                </Reveal>
               ))}
             </ol>
           </div>
@@ -137,18 +143,22 @@ export default function LandingPage() {
         <section id="safety" className={`${styles.band} ${styles.bandDark}`}>
           <div className={styles.wrap}>
             <span className={`eyebrow ${styles.eyebrowDark}`}>Safety</span>
+            <Reveal>
             <h2 className={styles.sectionTitle}>
               Built so money moves <em>exactly once</em>.
             </h2>
+            </Reveal>
             <div className={styles.safety}>
-              {SAFETY.map((s) => (
-                <div key={s.title}>
+              {SAFETY.map((s, i) => (
+                <Reveal key={s.title} delay={i * 110} from="scale">
                   <h3>
-                    <Icon name="shield" size={18} />
+                    <span className={styles.shield}>
+                      <Icon name="shield" size={18} />
+                    </span>
                     {s.title}
                   </h3>
                   <p>{s.text}</p>
-                </div>
+                </Reveal>
               ))}
             </div>
           </div>
@@ -157,27 +167,31 @@ export default function LandingPage() {
         <section id="faq" className={styles.band}>
           <div className={styles.wrap}>
             <span className="eyebrow">Questions</span>
+            <Reveal>
             <h2 className={styles.sectionTitle}>Good to know.</h2>
+            </Reveal>
             <div className={styles.faq}>
-              {FAQ.map((f) => (
-                <details key={f.q}>
-                  <summary>{f.q}</summary>
-                  <p>{f.a}</p>
-                </details>
+              {FAQ.map((f, i) => (
+                <Reveal key={f.q} delay={i * 70}>
+                  <details>
+                    <summary>{f.q}</summary>
+                    <p>{f.a}</p>
+                  </details>
+                </Reveal>
               ))}
             </div>
           </div>
         </section>
 
         <section className={styles.band}>
-          <div className={`${styles.wrap} ${styles.cta}`}>
+          <Reveal className={`${styles.wrap} ${styles.cta}`} from="scale">
             <h2 className={styles.sectionTitle} style={{ margin: 0 }}>
               Run this month&apos;s payroll <em>on Stellar</em>.
             </h2>
             <Link href="/signup" className="btn btn-primary btn-lg">
               Create a free account
             </Link>
-          </div>
+          </Reveal>
         </section>
       </main>
 

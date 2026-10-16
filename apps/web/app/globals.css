@@ -314,6 +314,94 @@ dialog[open]::backdrop { animation: fade 0.2s ease-out; }
 .dialog-x { position: absolute; right: 12px; top: 12px; width: 40px; height: 40px; border: none; background: transparent; border-radius: 999px; color: var(--ink-2); display: flex; align-items: center; justify-content: center; }
 .dialog-x:hover { background: var(--sunken); }
 
+/* ───────── Motion layer: alive, but always in service of the money story ───────── */
+@keyframes ripple { from { transform: scale(0.7); opacity: 0.9; } to { transform: scale(1.9); opacity: 0; } }
+@keyframes slide-in-left { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: none; } }
+@keyframes stripes { from { background-position: 0 0; } to { background-position: 22px 0; } }
+@keyframes shine { from { transform: translateX(-130%) skewX(-20deg); } to { transform: translateX(330%) skewX(-20deg); } }
+@keyframes word-up { from { opacity: 0; transform: translateY(0.45em); filter: blur(4px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes underline-draw { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes paper-in { from { opacity: 0; transform: translateY(26px) rotate(-1.2deg); } to { opacity: 1; transform: none; } }
+@keyframes seal { 0% { opacity: 0; transform: scale(2.2) rotate(-14deg); } 55% { opacity: 1; transform: scale(0.92) rotate(-9deg); } 75% { transform: scale(1.04) rotate(-9deg); } 100% { opacity: 1; transform: rotate(-9deg); } }
+@keyframes ink-bleed { from { box-shadow: 0 0 0 0 currentColor; } to { box-shadow: 0 0 0 10px transparent; } }
+@keyframes row-paid { 0% { background-color: var(--green-tint); } 100% { background-color: transparent; } }
+@keyframes row-failed { 0% { background-color: var(--failed-bg); } 100% { background-color: transparent; } }
+@keyframes breathe { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.25); opacity: 0.6; } }
+@keyframes nav-in { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes count-glow { from { color: var(--green); } to { color: inherit; } }
+
+/* Buttons: lift on hover, press down, the main action catches the light once. */
+.btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px -8px rgba(27, 38, 32, 0.45); }
+.btn:active:not(:disabled) { transform: translateY(0) scale(0.98); box-shadow: none; }
+.btn-primary { position: relative; overflow: hidden; }
+.btn-primary::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; pointer-events: none; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent); transform: translateX(-130%) skewX(-20deg); }
+.btn-primary:hover:not(:disabled)::after { animation: shine 0.9s ease-out; }
+.btn svg { transition: transform var(--t-base) var(--ease-spring); }
+.btn:hover:not(:disabled) svg { transform: translateX(2px) scale(1.06); }
+.icon-btn { transition: background-color var(--t-fast), transform var(--t-base) var(--ease-spring), color var(--t-fast); }
+.icon-btn:hover { transform: rotate(-6deg) scale(1.06); }
+
+/* Nav: the current item gets a green rule that grows in; icons nudge on hover. */
+.nav-link { position: relative; }
+.nav-link[aria-current="page"]::before { content: ""; position: absolute; left: -16px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--green); transform-origin: center; animation: nav-in 0.35s var(--ease-spring) both; }
+.nav-link svg { transition: transform var(--t-base) var(--ease-spring); }
+.nav-link:hover svg { transform: translateX(2px) scale(1.08); }
+.tag-testnet::before { animation: breathe 2.6s ease-in-out infinite; }
+
+/* Sheets arrive like paper being laid down; linkable cards lift. */
+.shell-main > .sheet, .shell-main > section.sheet, .shell-main > article.sheet { animation: paper-in 0.6s var(--ease-out) both; }
+.shell-main > *:nth-child(2) { animation-delay: 0.06s; }
+.shell-main > *:nth-child(3) { animation-delay: 0.12s; }
+.shell-main > *:nth-child(4) { animation-delay: 0.18s; }
+.shell-main > *:nth-child(n + 5) { animation-delay: 0.24s; }
+.lift { transition: transform var(--t-base) var(--ease-out), box-shadow var(--t-base) var(--ease-out); }
+.lift:hover { transform: translateY(-3px); box-shadow: 0 1px 0 var(--rule-soft), 0 26px 50px -30px rgba(27, 38, 32, 0.45); }
+
+/* Tables: rows deal in one after another; a row that just changed glows once. */
+.table tbody tr { animation: slide-in-left 0.42s var(--ease-out) both; }
+.table tbody tr:nth-child(1) { animation-delay: 0.04s; } .table tbody tr:nth-child(2) { animation-delay: 0.08s; }
+.table tbody tr:nth-child(3) { animation-delay: 0.12s; } .table tbody tr:nth-child(4) { animation-delay: 0.16s; }
+.table tbody tr:nth-child(5) { animation-delay: 0.2s; } .table tbody tr:nth-child(6) { animation-delay: 0.24s; }
+.table tbody tr:nth-child(7) { animation-delay: 0.28s; } .table tbody tr:nth-child(8) { animation-delay: 0.32s; }
+.table tbody tr:nth-child(n + 9) { animation-delay: 0.36s; }
+.table tbody tr.just-paid, .table tbody tr.just-paid:hover { animation: row-paid 2.2s ease-out both; }
+.table tbody tr.just-failed, .table tbody tr.just-failed:hover { animation: row-failed 2.2s ease-out both; }
+.table tbody tr .rowlink { background-image: linear-gradient(currentColor, currentColor); background-size: 0 1px; background-repeat: no-repeat; background-position: 0 100%; transition: background-size 0.3s var(--ease-out), color var(--t-fast); }
+.table tbody tr:hover .rowlink { background-size: 100% 1px; text-decoration: none; }
+
+/* Pills pop in when their status changes (they are keyed by status). */
+.pill { animation: pop 0.35s var(--ease-spring) both; }
+
+/* Money in flight: the striped ticks travel; paid ticks settle in green one by one. */
+.ticks i.sending { background-size: 22px 100%; background-image: repeating-linear-gradient(-45deg, var(--sending-stripe) 0 5px, #c9a95a 5px 11px); animation: tick-in 0.4s var(--ease-out) both, stripes 0.8s linear infinite; }
+.ticks i { transition: background-color 0.5s var(--ease-out), transform 0.3s var(--ease-spring); }
+.ticks:hover i { transform: scaleY(1.35); }
+
+/* Totals land on their double rule: the rule draws in under the figure. */
+.total-rule { position: relative; border-bottom: none; padding-bottom: 10px; }
+.total-rule::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 4px; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); transform-origin: left; animation: underline-draw 0.8s var(--ease-out) 0.25s both; }
+
+/* The rubber stamp on a finished run. */
+.seal { position: absolute; right: 28px; top: 92px; pointer-events: none; z-index: 2; font-family: var(--font-serif); font-size: 30px; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px 18px 8px; border: 3px double currentColor; border-radius: 6px; opacity: 0; animation: seal 0.7s var(--ease-out) 0.35s both; mix-blend-mode: multiply; }
+.seal small { display: block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; margin-top: 4px; text-align: center; }
+.seal-paid { color: var(--green); }
+.seal-partial { color: var(--failed); }
+@media (max-width: 640px) { .seal { right: 16px; top: 70px; font-size: 20px; padding: 7px 12px 6px; } }
+
+/* Headlines: words rise in, one after another (wrap words in .word). */
+.word { display: inline-block; animation: word-up 0.7s var(--ease-out) both; animation-delay: calc(var(--w, 0) * 70ms + 80ms); }
+
+/* Dialogs rise from below; their backdrop blurs the page a touch. */
+dialog[open] { animation: slide-up 0.32s var(--ease-spring); }
+dialog::backdrop { backdrop-filter: blur(2px); }
+
+/* Inputs: focus draws the eye with a soft ring. */
+.input, .select, .textarea { transition: border-color var(--t-base), box-shadow var(--t-base); }
+.input:focus, .select:focus, .textarea:focus { box-shadow: 0 0 0 4px rgba(15, 107, 75, 0.12); }
+
+/* Recently updated numbers glow green once. */
+.count-glow { animation: count-glow 1.4s ease-out both; }
+
 /* A button that is working shows a spinner (set aria-busy on it). */
 .btn[aria-busy="true"] { cursor: progress; }
 .btn[aria-busy="true"]:not(.btn-secondary):not(.btn-link)::before {

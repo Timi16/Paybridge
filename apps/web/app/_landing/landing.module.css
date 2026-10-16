@@ -73,3 +73,24 @@
   .demoStatus { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; min-height: 0; }
   .demoHead, .demoTicks, .demoTotal, .demoRows li { padding-left: 16px; padding-right: 16px; }
 }
+
+/* Motion */
+.heroDemo { animation: paper-in 0.9s var(--ease-out) 0.25s both; }
+.heroDemo:hover .demo { transform: rotate(0deg) translateY(-4px); }
+.demo { transition: transform 0.5s var(--ease-out), box-shadow 0.5s var(--ease-out); }
+.shield { display: inline-flex; width: 30px; height: 30px; border-radius: 50%; align-items: center; justify-content: center; background: rgba(143, 211, 180, 0.12); color: #8fd3b4; }
+.safety > div:hover .shield { animation: pop 0.4s var(--ease-spring); }
+.safety > div { transition: background-color 0.3s var(--ease-out); }
+.safety > div:hover { background: var(--night-2); }
+.step h3 { transition: color 0.2s; }
+.step:hover h3 { color: var(--green); }
+.faq summary { transition: color 0.2s; }
+.faq summary:hover { color: var(--green); }
+.faq details[open] p { animation: rise 0.3s var(--ease-out); }
+.trust li { animation: rise 0.5s var(--ease-out) both; }
+.trust li:nth-child(1) { animation-delay: 0.7s; } .trust li:nth-child(2) { animation-delay: 0.8s; }
+.trust li:nth-child(3) { animation-delay: 0.9s; } .trust li:nth-child(4) { animation-delay: 1s; }
+.demoTotal .money { transition: color 0.4s; }
+.demoSeal { position: absolute; right: 22px; top: 70px; }
+.demoRows li:global(.just-paid) { animation: row-paid 1.8s ease-out both; }
+.demoRows li:global(.just-failed) { animation: row-failed 1.8s ease-out both; }

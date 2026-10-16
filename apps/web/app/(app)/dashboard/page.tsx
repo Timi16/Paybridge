@@ -4,6 +4,8 @@ import { parseAmount } from "@paybridge/shared";
 import Link from "next/link";
 import { useState } from "react";
 import { Icon } from "@/components/Icon";
+import { wordCount, Words } from "@/components/motion/Words";
+import { CountUpInt } from "@/components/motion/CountUp";
 import { Money } from "@/components/payroll/Money";
 import { NewRunDialog } from "@/components/payroll/NewRunDialog";
 import { countsText, Ticks } from "@/components/payroll/Ticks";
@@ -35,8 +37,8 @@ function NextRun({ run }: { run: RunSummary }) {
   const day = run.payDate ? new Date(`${run.payDate}T00:00:00Z`) : null;
   const paying = run.status === "PAYING";
   return (
-    <div style={{ display: "flex", gap: 20, alignItems: "center", padding: "20px 28px", borderTop: "1px solid var(--rule)", flexWrap: "wrap" }}>
-      <span className="date-tile" aria-hidden="true">
+    <div className="lift" style={{ display: "flex", gap: 20, alignItems: "center", padding: "20px 28px", borderTop: "1px solid var(--rule)", flexWrap: "wrap", background: "var(--sheet)" }}>
+      <span className="date-tile anim-scale-in" aria-hidden="true" style={{ animationDelay: "0.4s" }}>
         <b>{day ? day.toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" }).toUpperCase() : "DRAFT"}</b>
         <span>{day ? day.getUTCDate() : "—"}</span>
       </span>
@@ -135,7 +137,7 @@ function RecentRuns({ runs }: { runs: RunSummary[] }) {
           </thead>
           <tbody>
             {runs.map((r) => (
-              <tr key={r.id}>
+              <tr key={r.id} className="lift">
                 <td>
                   <Link href={`/payroll/${r.id}`} className="rowlink">
                     {r.name}
@@ -191,18 +193,22 @@ export default function OverviewPage() {
     <span className="skeleton" style={{ display: "inline-block", width: "min(520px, 90%)" }}>
       Loading
     </span>
-  ) : next?.status === "PAYING" ? (
-    <>
-      {greeting()} <em>{next.name}</em> is being paid.
-    </>
-  ) : next ? (
-    <>
-      {greeting()} <em>{next.name}</em> is ready to review.
-    </>
   ) : (
-    <>
-      {greeting()} Payroll, <em>signed once</em>.
-    </>
+    (() => {
+      const hello = greeting();
+      const [lead, em, tail] = next?.status === "PAYING" ? [hello, next.name, "is being paid."] : next ? [hello, next.name, "is ready to review."] : [`${hello} Payroll,`, "signed once.", ""];
+      return (
+        <>
+          <Words text={lead} /> <em><Words text={em} start={wordCount(lead)} /></em>
+          {tail ? (
+            <>
+              {" "}
+              <Words text={tail} start={wordCount(lead) + wordCount(em)} />
+            </>
+          ) : null}
+        </>
+      );
+    })()
   );
 
   return (
@@ -229,7 +235,7 @@ export default function OverviewPage() {
       ) : null}
 
       <section className="sheet" aria-label="This month">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
+        <div className="stagger" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
           <div className="sheet-pad" style={{ borderRight: "1px solid var(--rule-soft)", display: "flex", flexDirection: "column", gap: 12 }}>
             <span className="eyebrow">Paid this month</span>
             {data ? <Money amount={data.paidThisMonth} /> : <span className="skeleton" style={{ height: 40, width: 200 }} />}
@@ -262,7 +268,7 @@ export default function OverviewPage() {
             <span className="eyebrow">Needs a look</span>
             {data ? (
               <span className="money" style={{ fontSize: 40, color: data.failedLines + data.employeesWithProblems > 0 ? "var(--failed)" : undefined }}>
-                {data.failedLines + data.employeesWithProblems}
+                <CountUpInt value={data.failedLines + data.employeesWithProblems} />
               </span>
             ) : (
               <span className="skeleton" style={{ height: 40, width: 60 }} />

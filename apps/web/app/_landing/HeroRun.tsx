@@ -41,6 +41,12 @@ export function HeroRun() {
 
   return (
     <div className={`sheet stub ${styles.demo}`} aria-label="Example payroll run (illustration)" role="img">
+      {stage === 4 ? (
+        <span className={`seal seal-partial ${styles.demoSeal}`} aria-hidden="true">
+          Partly paid
+          <small>4 OF 5 PAID</small>
+        </span>
+      ) : null}
       <div className={styles.demoHead}>
         <div>
           <span className="eyebrow">Payroll · Run #0007</span>
@@ -71,7 +77,7 @@ export function HeroRun() {
         {PEOPLE.map((p) => {
           const st = status(p);
           return (
-            <li key={p.name}>
+            <li key={p.name} className={st === "paid" && stage === 4 ? "just-paid" : st === "failed" && stage === 1 ? "just-failed" : undefined}>
               <span className="who">
                 <b>{p.name}</b>
                 <span>{p.wallet}</span>
@@ -94,7 +100,7 @@ export function HeroRun() {
       </ul>
       <div className={styles.demoTotal}>
         <span className="eyebrow">{stage === 4 ? "Paid" : "To send"}</span>
-        <span className="money total-rule" style={{ fontSize: 34 }}>
+        <span key={stage >= 1 ? "after" : "before"} className="money total-rule count-glow" style={{ fontSize: 34 }}>
           {stage >= 1 ? "12,550.00" : "14,300.00"}
           <span className="unit">USDC</span>
         </span>
