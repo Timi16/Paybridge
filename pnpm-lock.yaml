@@ -188,7 +188,7 @@ importers:
         specifier: '*'
         version: 0.10.26
       '@stellar/stellar-sdk':
-        specifier: '*'
+        specifier: 17.2.1
         version: 17.2.1(debug@4.4.3)
       argon2:
         specifier: '*'
