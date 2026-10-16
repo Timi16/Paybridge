@@ -1,6 +1,6 @@
 import type { Trustline } from "@paybridge/shared";
 import { AppError } from "../lib/errors";
-import type { AccountState, FoundTransaction, LedgerInfo, StellarGateway, SubmitResult } from "./gateway";
+import type { AccountState, LedgerInfo, StellarGateway, SubmitResult, TransactionLookup } from "./gateway";
 
 interface HorizonBalance {
   asset_type?: string;
@@ -22,12 +22,32 @@ interface HorizonAccount {
   balances?: HorizonBalance[];
 }
 
+/** At most this many Horizon requests in flight from this process, whoever asked. */
+const MAX_CONCURRENT = 12;
+
+class Semaphore {
+  private active = 0;
+  private readonly queue: (() => void)[] = [];
+  constructor(private readonly max: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.max) await new Promise<void>((resolve) => this.queue.push(resolve));
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.queue.shift()?.();
+    }
+  }
+}
+
 const unavailable = () =>
   new AppError("HORIZON_UNAVAILABLE", "Could not reach Stellar right now. Try again in a moment.", { retryAfter: 10 });
 
 /** Stellar over Horizon. Every read has a timeout; submission waits longer (Horizon holds it ~30 s). */
 export class HorizonGateway implements StellarGateway {
   private readonly base: string;
+  private readonly slots = new Semaphore(MAX_CONCURRENT);
 
   constructor(
     horizonUrl: string,
@@ -37,20 +57,21 @@ export class HorizonGateway implements StellarGateway {
     this.base = horizonUrl.replace(/\/$/, "");
   }
 
-  private async getJson<T>(path: string): Promise<{ status: number; body: T | null }> {
+  private async getJson<T>(path: string): Promise<{ status: number; body: T | null; nodeLedger: number | null }> {
     let res: Response;
     try {
-      res = await fetch(`${this.base}${path}`, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
+      res = await this.slots.run(() =>
+        fetch(`${this.base}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(this.timeoutMs) }),
+      );
     } catch {
       throw unavailable();
     }
-    if (res.status === 404) return { status: 404, body: null };
+    const header = res.headers.get("latest-ledger");
+    const nodeLedger = header && /^\d+$/.test(header) ? Number.parseInt(header, 10) : null;
+    if (res.status === 404) return { status: 404, body: null, nodeLedger };
     if (!res.ok) throw unavailable();
     try {
-      return { status: res.status, body: (await res.json()) as T };
+      return { status: res.status, body: (await res.json()) as T, nodeLedger };
     } catch {
       throw unavailable();
     }
@@ -102,29 +123,29 @@ export class HorizonGateway implements StellarGateway {
     return { sequence: rec.sequence, closedAt: new Date(rec.closed_at) };
   }
 
-  async getTransaction(hash: string): Promise<FoundTransaction | null> {
-    const { body } = await this.getJson<{ successful?: boolean; ledger?: number; created_at?: string; result_xdr?: string }>(
+  async getTransaction(hash: string): Promise<TransactionLookup> {
+    const { body, nodeLedger } = await this.getJson<{ successful?: boolean; ledger?: number; created_at?: string; result_xdr?: string }>(
       `/transactions/${encodeURIComponent(hash)}`,
     );
-    if (!body) return null;
+    if (!body) return { found: null, nodeLedger };
     if (typeof body.ledger !== "number" || !body.created_at || !body.result_xdr) throw unavailable();
     return {
-      successful: body.successful === true,
-      ledger: body.ledger,
-      closedAt: new Date(body.created_at),
-      resultXdr: body.result_xdr,
+      found: { successful: body.successful === true, ledger: body.ledger, closedAt: new Date(body.created_at), resultXdr: body.result_xdr },
+      nodeLedger,
     };
   }
 
   async submit(signedXdr: string): Promise<SubmitResult> {
     let res: Response;
     try {
-      res = await fetch(`${this.base}/transactions`, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-        body: new URLSearchParams({ tx: signedXdr }).toString(),
-        signal: AbortSignal.timeout(this.submitTimeoutMs),
-      });
+      res = await this.slots.run(() =>
+        fetch(`${this.base}/transactions`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+          body: new URLSearchParams({ tx: signedXdr }).toString(),
+          signal: AbortSignal.timeout(this.submitTimeoutMs),
+        }),
+      );
     } catch {
       return { kind: "unknown" };
     }
@@ -132,7 +153,8 @@ export class HorizonGateway implements StellarGateway {
     if (res.ok) {
       const b = body as { successful?: boolean; ledger?: number; created_at?: string } | null;
       if (b && b.successful !== false && typeof b.ledger === "number") {
-        return { kind: "success", ledger: b.ledger, closedAt: b.created_at ? new Date(b.created_at) : new Date() };
+        // Horizon's submit response has no close time; callers read it from the ledger record.
+        return { kind: "success", ledger: b.ledger, closedAt: b.created_at ? new Date(b.created_at) : null };
       }
       return { kind: "unknown" };
     }

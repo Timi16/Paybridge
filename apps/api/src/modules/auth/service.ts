@@ -168,9 +168,12 @@ export function createAuthService(deps: AppDeps) {
           await tx.trustedDevice.deleteMany({ where: { companyId } });
           await tx.apiKey.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: now } });
           await tx.wallet.updateMany({ where: { companyId, deletedAt: null }, data: { deletedAt: now } });
+          await tx.passwordReset.deleteMany({ where: { companyId } });
+          await tx.emailVerification.deleteMany({ where: { companyId } });
           await tx.company.update({
             where: { id: companyId },
-            data: { closedAt: now, email: `closed-${companyId}@closed.invalid`, notifyPaid: false, notifyProblems: false },
+            // The hash is replaced with a value argon2 can never match: nobody can sign in again.
+            data: { closedAt: now, email: `closed-${companyId}@closed.invalid`, passwordHash: "closed", notifyPaid: false, notifyProblems: false },
           });
         },
         { timeout: 60_000 },
@@ -204,7 +207,7 @@ export function createAuthService(deps: AppDeps) {
         throw new AppError("SERVICE_UNAVAILABLE", "Password reset by email isn't set up on this server yet");
       }
       const company = await repo.findCompanyByEmail(prisma, email);
-      if (!company) return;
+      if (!company || company.closedAt) return;
       const latest = await prisma.passwordReset.findFirst({
         where: { companyId: company.id },
         orderBy: { createdAt: "desc" },
@@ -216,7 +219,9 @@ export function createAuthService(deps: AppDeps) {
         data: { id: hashSessionToken(token), companyId: company.id, expiresAt: new Date(Date.now() + RESET_TTL_MS) },
       });
       const link = `${webOrigin}/reset-password?token=${token}`;
-      await deps.mailer
+      // Not awaited: waiting for the mail server only when the account exists would let response
+      // times reveal who has an account.
+      void deps.mailer
         .send({
           to: company.email,
           subject: "Reset your PayBridge password",
@@ -245,7 +250,10 @@ export function createAuthService(deps: AppDeps) {
         if (used.count === 0) {
           throw new AppError("CHALLENGE_EXPIRED", "This reset link has expired or was already used. Ask for a new one.");
         }
-        const reset = await tx.passwordReset.findUniqueOrThrow({ where: { id } });
+        const reset = await tx.passwordReset.findUniqueOrThrow({ where: { id }, include: { company: { select: { closedAt: true } } } });
+        if (reset.company.closedAt) {
+          throw new AppError("CHALLENGE_EXPIRED", "This reset link has expired or was already used. Ask for a new one.");
+        }
         const company = await tx.company.update({ where: { id: reset.companyId }, data: { passwordHash } });
         await tx.session.deleteMany({ where: { companyId: reset.companyId } });
         await tx.passwordReset.deleteMany({ where: { companyId: reset.companyId, id: { not: id } } });
@@ -345,7 +353,8 @@ export function createAuthService(deps: AppDeps) {
       const trusted = deviceToken ? await isTrustedDevice(deviceToken, input.email) : false;
       await throttle.assertAllowed(trusted ? [pair] : [pair, account]);
 
-      const company = await repo.findCompanyByEmail(prisma, input.email);
+      const found = await repo.findCompanyByEmail(prisma, input.email);
+      const company = found && !found.closedAt ? found : null;
       const hash = company?.passwordHash ?? (await dummyHash);
       const ok = await argon2.verify(hash, input.password).catch(() => false);
       if (!company || !ok) {

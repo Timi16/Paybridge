@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AmountSchema, IdSchema, PaginationQuery, RECEIVE_PROBLEMS } from "./common";
+import { AmountSchema, IdSchema, PaginationQuery, RECEIVE_PROBLEMS, SafeText } from "./common";
 
 export const RUN_STATUSES = ["DRAFT", "PAYING", "PAID", "PARTIAL", "FAILED", "CANCELLED"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
@@ -14,7 +14,7 @@ export type FailureCode = (typeof FAILURE_CODES)[number];
 /** Most payments in one Stellar transaction. */
 export const MAX_BATCH_OPS = 100;
 
-const RunName = z.string().trim().min(1, "Give the run a name").max(100);
+const RunName = SafeText(1, 100, "Give the run a name");
 const PayDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 
 export const CreateRunBody = z

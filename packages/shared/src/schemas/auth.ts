@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SafeText } from "./common";
 
 const Email = z.string().trim().toLowerCase().email().max(254);
 // Upper bound keeps argon2 from being used as a CPU-exhaustion vector.
@@ -8,7 +9,7 @@ export const SignupBody = z
   .object({
     email: Email,
     password: NewPassword,
-    businessName: z.string().trim().min(1).max(100),
+    businessName: SafeText(1, 100),
   })
   .strict();
 export type SignupBody = z.infer<typeof SignupBody>;
@@ -45,7 +46,7 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBody>;
 /** Any subset of the company's settings; at least one field. */
 export const UpdateSettingsBody = z
   .object({
-    businessName: z.string().trim().min(1).max(100),
+    businessName: SafeText(1, 100),
     /** Email when a run finishes with everyone paid. */
     notifyPaid: z.boolean(),
     /** Email when a run finishes with lines that failed. */

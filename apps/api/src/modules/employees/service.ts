@@ -167,12 +167,15 @@ export function createEmployeeService(deps: AppDeps) {
     async update(companyId: string, id: string, input: UpdateEmployeeBody): Promise<EmployeeRow> {
       if (input.walletAddress !== undefined) assertWalletAddress(input.walletAddress);
       const amount = input.defaultAmount !== undefined ? amountOf(input.defaultAmount) : undefined;
-      const before = await getOwned(companyId, id);
-      const walletChanged = input.walletAddress !== undefined && input.walletAddress !== before.walletAddress;
+      const outside = await getOwned(companyId, id);
+      const walletChanged = input.walletAddress !== undefined && input.walletAddress !== outside.walletAddress;
       await prisma.$transaction(async (tx) => {
         await lockCompanyPeople(tx, companyId);
+        // Re-read under the lock: a restore or another edit may have changed it meanwhile.
+        const before = await tx.employee.findFirst({ where: { id, companyId } });
+        if (!before) throw notFound("Person");
         await assertGroup(tx, companyId, input.groupId);
-        if (walletChanged && before.archivedAt === null && input.walletAddress) {
+        if (input.walletAddress && input.walletAddress !== before.walletAddress && before.archivedAt === null) {
           await assertWalletFree(tx, companyId, input.walletAddress, id);
         }
         await tx.employee.updateMany({
@@ -202,9 +205,11 @@ export function createEmployeeService(deps: AppDeps) {
     },
 
     async restore(companyId: string, id: string): Promise<EmployeeRow> {
-      const e = await getOwned(companyId, id);
+      await getOwned(companyId, id);
       await prisma.$transaction(async (tx) => {
         await lockCompanyPeople(tx, companyId);
+        const e = await tx.employee.findFirst({ where: { id, companyId } });
+        if (!e) throw notFound("Person");
         await assertWalletFree(tx, companyId, e.walletAddress, id);
         await tx.employee.updateMany({ where: { id, companyId }, data: { archivedAt: null } });
       });

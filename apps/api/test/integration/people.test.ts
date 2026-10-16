@@ -51,6 +51,18 @@ describe("people", () => {
       expect((await post("/v1/employees", { name: "X", walletAddress: address, defaultAmount: "1" })).status, address).toBe(400);
       expect((await post("/v1/wallets", { address })).status, address).toBe(400);
     }
+    // A secret pasted into any free-text field (names, roles, labels, groups) is refused too.
+    for (const [path, body] of [
+      ["/v1/employees", { name: `Ada ${secret}`, walletAddress: Keypair.random().publicKey(), defaultAmount: "1" }],
+      ["/v1/employees", { name: "Ada", role: secret, walletAddress: Keypair.random().publicKey(), defaultAmount: "1" }],
+      ["/v1/groups", { name: secret }],
+      ["/v1/wallets", { address: Keypair.random().publicKey(), label: secret }],
+      ["/v1/api-keys", { name: secret }],
+    ] as const) {
+      const res = await post(path, body);
+      expect(res.status, path).toBe(400);
+      expect(JSON.stringify(res.body)).not.toContain(secret);
+    }
     expect(await prisma.employee.count()).toBe(0);
     expect(await prisma.wallet.count()).toBe(0);
     const dump = JSON.stringify(await prisma.$queryRawUnsafe('SELECT * FROM "Employee"')) + JSON.stringify(await prisma.$queryRawUnsafe('SELECT * FROM "Wallet"'));

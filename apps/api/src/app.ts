@@ -165,6 +165,12 @@ export function buildApp(input: BuildAppDeps): BuiltApp {
   v1.use(requireOrigin);
   v1.use(requireVerifiedEmail);
   v1.use(limiter({ limit: limits.v1PerMin, key: (req) => `company:${authOf(req).companyId}` }));
+  // A run check can mean a thousand Horizon lookups: these routes get their own, much lower, budget so
+  // one company can't exhaust the shared Horizon allowance for everyone.
+  v1.use(
+    ["/payroll-runs/:id/check", "/payroll-runs/:id/start", "/payroll-runs/:id/retry", "/payroll-runs/:id/batches/next", "/employees/check"],
+    limiter({ limit: limits.stellarHeavyPerMin, key: (req) => `stellar:${authOf(req).companyId}` }),
+  );
   v1.use("/api-keys", sessionOnly, apiKeyRoutes(createApiKeyService(deps)));
   v1.use("/wallets", sessionOnly, walletRoutes(walletService));
   v1.use("/groups", groupRoutes(createGroupService(deps)));

@@ -198,6 +198,10 @@ describe("auth", () => {
     expect((await company.agent.get("/auth/me")).status).toBe(401);
     expect((await anon().get("/v1/employees").set("Authorization", `Bearer ${key}`)).status).toBe(401);
     expect((await anon().post("/auth/login").set("Origin", ORIGIN).send({ email: company.email, password: company.password })).status).toBe(401);
+    // The closed account itself can never be signed into again, even with its rewritten email.
+    const closedEmail = `closed-${company.id}@closed.invalid`;
+    expect((await anon().post("/auth/login").set("Origin", ORIGIN).send({ email: closedEmail, password: company.password })).status).toBe(401);
+    expect(await prisma.passwordReset.count({ where: { companyId: company.id } })).toBe(0);
     const again = await anon().post("/auth/signup").set("Origin", ORIGIN).send({ email: company.email, password: "a brand new password", businessName: "Again" });
     expect(again.status).toBe(201);
     // The funding wallet is free for another company to add.
@@ -683,6 +687,17 @@ describe("platform", () => {
     expect((await request(limited.app).get("/v1/employees").set("Cookie", cookieA)).status).toBe(429);
     // The limit is per company: B is unaffected by A's burst.
     expect((await request(limited.app).get("/v1/employees").set("Cookie", cookieB)).status).toBe(200);
+  });
+
+  it("Horizon-heavy routes have their own, lower budget per company", async () => {
+    const limited = makeApp({ stellarHeavyPerMin: 2 });
+    const c = await signup(limited);
+    for (let i = 0; i < 2; i++) expect((await c.agent.post("/v1/employees/check").set("Origin", ORIGIN).send({})).status).toBe(200);
+    const blocked = await c.agent.post("/v1/employees/check").set("Origin", ORIGIN).send({});
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe("RATE_LIMITED");
+    // Ordinary reads are unaffected.
+    expect((await c.agent.get("/v1/employees")).status).toBe(200);
   });
 
   it("the 50 kb body limit holds everywhere except bulk import, which takes up to 200 kb", async () => {

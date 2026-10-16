@@ -20,6 +20,16 @@ export interface LedgerInfo {
   closedAt: Date;
 }
 
+/**
+ * A transaction lookup. `found` is null when the answering Horizon node has no such transaction;
+ * `nodeLedger` is the latest ledger that node had ingested (its Latest-Ledger header), so a "not
+ * found" can be trusted only from a node at least as far along as the ledger you are judging by.
+ */
+export interface TransactionLookup {
+  found: FoundTransaction | null;
+  nodeLedger: number | null;
+}
+
 export interface FoundTransaction {
   successful: boolean;
   ledger: number;
@@ -30,10 +40,10 @@ export interface FoundTransaction {
 
 export type SubmitResult =
   /** Applied in a ledger and successful. */
-  | { kind: "success"; ledger: number; closedAt: Date }
+  | { kind: "success"; ledger: number; closedAt: Date | null }
   /**
-   * Refused. txCode "tx_failed" means the transaction made it into a ledger and every
-   * operation was rolled back; any other code means it was rejected before reaching a ledger.
+   * Refused. Even "tx_failed" does not prove the transaction reached a ledger (stellar-core also
+   * answers it for operations that fail validation at submission), so only a ledger lookup is final.
    * opCodes is per operation, in order ("op_success", "op_no_trust", …), when Stellar gave them.
    */
   | { kind: "failed"; txCode: string; opCodes: string[] }
@@ -47,8 +57,7 @@ export type SubmitResult =
 export interface StellarGateway {
   loadAccount(address: string): Promise<AccountState>;
   latestLedger(): Promise<LedgerInfo>;
-  /** null when Stellar has no transaction with this hash (yet). */
-  getTransaction(hash: string): Promise<FoundTransaction | null>;
+  getTransaction(hash: string): Promise<TransactionLookup>;
   submit(signedXdr: string): Promise<SubmitResult>;
 }
 

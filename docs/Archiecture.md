@@ -24,22 +24,21 @@ Run-to-paid lifecycle
 5. Submit. POST /batches/:id/submit with the signed XDR. The server checks the transaction hash
    equals the stored hash (signatures do not change the hash, so any edit is caught), marks the
    batch SUBMITTED, and submits to Horizon.
-   • Success → batch CONFIRMED; every line PAID with tx hash, ledger and close time.
-   • Failed in a ledger (tx_failed) → batch FAILED; each line whose operation failed for a reason
-     on the recipient's side (no account, no trustline, not authorised, line full) becomes FAILED
-     with that reason; every other line goes back to PENDING (it was not sent and will go in the
-     next batch).
-   • Rejected before a ledger (bad sequence, too late, bad auth, fee) → NOT final: the same
-     envelope may already have landed elsewhere, or still land. The code is recorded, the batch
-     stays SUBMITTED and the confirmer settles it.
-   • Timeout or 5xx → batch stays SUBMITTED; the worker resolves it.
+   Whatever Horizon answers, the batch is settled only from the ledger's own record of the hash
+   (looked up straight away, then by the confirmer): found successful → CONFIRMED, every line PAID
+   with tx hash, ledger and the ledger's close time; found failed → FAILED, and each line whose
+   operation failed for a reason on the recipient's side (no account, no trustline, not authorised,
+   line full) becomes FAILED with that reason, every other line goes back to PENDING. A rejection
+   (even "tx_failed", which stellar-core also answers at validation) or a timeout is never final on
+   its own: the code is recorded and the batch stays SUBMITTED.
 6. Confirmer (worker, every 5 s). For every AWAITING_SIGNATURE or SUBMITTED batch: read the funding
    account and the latest ledger, THEN look the hash up (anything landed by then is findable).
    Found → settle as in step 5 (this also catches a batch the company submitted somewhere else).
-   Not found and the latest ledger closed after the batch's maxTime → it can never land → EXPIRED,
-   lines back to PENDING. If the account has already used the batch's sequence number, a 404 may
-   be a lagging Horizon node, so expiry waits a further 2 minutes of ledger time. A SUBMITTED batch
-   with no answer inside its window is sent again (the same envelope can only land once).
+   Not found, from a Horizon node whose Latest-Ledger is at least the ledger read, and that ledger
+   closed more than 30 s after the batch's maxTime (2 minutes if the funding account already used
+   the batch's sequence number) → it can never land → EXPIRED, lines back to PENDING. A SUBMITTED
+   batch with no answer inside its window is sent again at most every 30 s (the same envelope can
+   only land once). Companies take turns; unsigned batches inside their window are looked at every 30 s.
 7. Finish. When a PAYING run has no PENDING or SENDING lines left it becomes PAID (every line paid),
    PARTIAL (some paid, some failed) or FAILED (none paid). Retry moves FAILED lines back to PENDING
    after a fresh check and the run back to PAYING. A PAID line never changes again.
@@ -86,7 +85,9 @@ Accounts and access
 [ ] Login rate limit and lockout with trusted-device exemption (unchanged)
 [ ] API keys pb_test_ + 32 random bytes, shown once, hash stored, revocable
 [ ] Tenant isolation: every repo function takes companyId; tests prove cross-company access returns 404
-[ ] Closing an account requires the current password
+[ ] Closing an account requires the current password; a closed account's password, reset links and sessions stop working
+[ ] Free-text fields refuse anything that looks like a secret key
+[ ] Horizon-heavy routes (check, start, next batch, retry, employee checks) have their own budget (20/min per company); at most 12 Horizon requests in flight per process; at most 10 runs being paid per company
 Stellar
 [ ] Never accept, store or log a secret key: any S… input is refused with SECRET_KEY_REJECTED
 [ ] Testnet only: refuse to boot unless NETWORK_PASSPHRASE is the testnet one

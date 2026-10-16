@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { SafeText } from "./common";
 
-export const CreateApiKeyBody = z.object({ name: z.string().trim().min(1).max(64) }).strict();
+export const CreateApiKeyBody = z.object({ name: SafeText(1, 64) }).strict();
 export type CreateApiKeyBody = z.infer<typeof CreateApiKeyBody>;
 
 export const ApiKeySchema = z.object({

@@ -111,7 +111,7 @@ op_not_authorized → NOT_AUTHORIZED; op_line_full → TRUSTLINE_LIMIT_TOO_LOW; 
 op_src_* / op_no_account / op_bad_auth → back to PENDING (not the recipient's fault); anything else → PAYMENT_FAILED.
 
 Worker
-confirmer every 5 s (batches AWAITING_SIGNATURE whose window opened, and SUBMITTED), notifier every 15 s,
+confirmer every 5 s (SUBMITTED batches; unsigned ones every 30 s or once past their window; companies round-robin, 40 per tick), notifier every 15 s,
 counter pruning hourly. Exactly one worker.
 
 Env

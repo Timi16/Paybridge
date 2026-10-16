@@ -18,8 +18,8 @@ const unauthenticated = () => new AppError("UNAUTHENTICATED", "Authentication re
 
 async function fromApiKey(prisma: PrismaClient, key: string): Promise<AuthContext | null> {
   if (!key.startsWith(API_KEY_PREFIX) || key.length > 128) return null;
-  const row = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(key) } });
-  if (!row || row.revokedAt) return null;
+  const row = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(key) }, include: { company: { select: { closedAt: true } } } });
+  if (!row || row.revokedAt || row.company.closedAt) return null;
   // Throttled so a busy key costs one write a minute, not one per request.
   if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {
     await prisma.apiKey
@@ -33,8 +33,8 @@ async function fromApiKey(prisma: PrismaClient, key: string): Promise<AuthContex
 async function fromSession(prisma: PrismaClient, token: string): Promise<AuthContext | null> {
   if (token.length > 128) return null;
   const id = hashSessionToken(token);
-  const row = await prisma.session.findUnique({ where: { id }, include: { company: { select: { emailVerifiedAt: true } } } });
-  if (!row) return null;
+  const row = await prisma.session.findUnique({ where: { id }, include: { company: { select: { emailVerifiedAt: true, closedAt: true } } } });
+  if (!row || row.company.closedAt) return null;
   if (row.expiresAt.getTime() <= Date.now()) {
     await prisma.session.deleteMany({ where: { id } }).catch(() => undefined);
     return null;

@@ -21,6 +21,7 @@ const NO_LIMITS: Partial<Limits> = {
   authPerMin: 10_000,
   authReadPerMin: 10_000,
   v1PerMin: 10_000,
+  stellarHeavyPerMin: 10_000,
   v1PerIpPerMin: 10_000,
 };
 

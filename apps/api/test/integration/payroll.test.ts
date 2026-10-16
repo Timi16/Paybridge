@@ -278,8 +278,11 @@ describe("payroll runs", () => {
     quick.stellar.ledgerTime = new Date(new Date(b.maxTime).getTime() - 1000);
     expect((await nextBatch(company, run.id)).batch).toBeNull();
     expect((await prisma.payrollBatch.findUniqueOrThrow({ where: { id: b.id } })).status).toBe("AWAITING_SIGNATURE");
-    // A ledger closes after the window: it can never land now, so a new envelope is built.
+    // A ledger closes inside the 30 s grace after the window: still not trusted as final.
     quick.stellar.closeLedger(10_000);
+    expect((await nextBatch(company, run.id)).batch).toBeNull();
+    // Past the grace too: it can never land now, so a new envelope is built.
+    quick.stellar.closeLedger(40_000);
     const fresh = (await nextBatch(company, run.id)).batch!;
     expect(fresh).toMatchObject({ number: 2, opCount: 2 });
     expect(fresh.txHash).not.toBe(b.txHash);
@@ -414,6 +417,45 @@ describe("payroll runs", () => {
     expect(t.stellar.usdcBalance(people[0]?.walletAddress ?? "")).toBe("1000.0000000");
   });
 
+  it("R16: a 'not found' from a Horizon node that is behind never expires a batch, even long past its window", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 1);
+    const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    const b = (await nextBatch(company, run.id)).batch!;
+    t.stellar.lagging.add(b.txHash);
+    passWindow();
+    expect(await confirm()).toBe(0);
+    expect((await prisma.payrollBatch.findUniqueOrThrow({ where: { id: b.id } })).status).toBe("AWAITING_SIGNATURE");
+    t.stellar.lagging.clear();
+    // The confirmer looks at an unsigned batch at most every 30 s.
+    expect(await confirmOpenBatches({ prisma, payroll: t.payroll, logger: silentLogger }, Date.now() + 31_000)).toBe(1);
+    expect((await prisma.payrollBatch.findUniqueOrThrow({ where: { id: b.id } })).status).toBe("EXPIRED");
+  });
+
+  it("R9: a tx_failed answer at submission is final only once the ledger shows it", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 2);
+    const run = await createRun(company, wallet, { employeeIds: people.map((p) => p.id) });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    const b = (await nextBatch(company, run.id)).batch!;
+    t.stellar.submitMode = { reject: "tx_failed" }; // e.g. op_bad_auth at validation: never reached a ledger
+    const res = await submit(company, run.id, b, sign(b, wallet.keypair));
+    expect(res.status).toBe(202);
+    expect(res.body.batch).toMatchObject({ status: "SUBMITTED", resultCode: "tx_failed" });
+    expect(statuses(res.body.run)).toEqual(["SENDING", "SENDING"]);
+  });
+
+  it("R8: the paid time is the ledger's close time, not the server's clock", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 1);
+    t.stellar.ledgerTime = new Date("2026-09-30T23:59:50Z");
+    const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    const b = (await nextBatch(company, run.id)).batch!;
+    await submit(company, run.id, b, sign(b, wallet.keypair));
+    const after = await getRun(company, run.id);
+    expect(after.items[0]?.paidAt).toBe(t.stellar.txs.get(b.txHash)?.closedAt.toISOString());
+    expect(after.items[0]?.paidAt?.startsWith("2026-09-30")).toBe(true);
+  });
+
   it("R10: a signed batch the network never received is sent again by the confirmer while its window is open", async () => {
     const { company, wallet, people } = await setupPayroll(t, 1);
     const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
@@ -422,6 +464,11 @@ describe("payroll runs", () => {
     t.stellar.submitMode = { reject: "tx_insufficient_fee" }; // e.g. a fee surge
     expect((await submit(company, run.id, b, sign(b, wallet.keypair))).status).toBe(202);
     t.stellar.submitMode = "apply";
+    // Not re-sent straight away (at most every 30 s)…
+    expect(await confirm()).toBe(0);
+    expect(t.stellar.submits).toBe(1);
+    // …but once 30 s have passed since it was sent, it is.
+    await prisma.payrollBatch.update({ where: { id: b.id }, data: { submittedAt: new Date(Date.now() - 31_000) } });
     expect(await confirm()).toBe(1);
     expect((await getRun(company, run.id)).status).toBe("PAID");
     expect(t.stellar.submits).toBe(2);

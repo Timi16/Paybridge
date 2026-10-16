@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { IdSchema } from "./common";
+import { IdSchema, SafeText } from "./common";
 
 export const AddWalletBody = z
   .object({
     address: z.string().trim().min(1).max(100),
-    label: z.string().trim().min(1).max(64).optional(),
+    label: SafeText(1, 64).optional(),
   })
   .strict();
 export type AddWalletBody = z.infer<typeof AddWalletBody>;

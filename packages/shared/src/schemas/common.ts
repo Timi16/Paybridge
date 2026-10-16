@@ -59,6 +59,19 @@ export const AmountSchema = z
     return s !== null && s > 0n;
   }, "Amount must be greater than 0 and at most 922337203685.4775807");
 
+/** A Stellar secret seed (S + 55 base32 characters) anywhere in a piece of text. */
+export const SECRET_SEED = /S[A-Z2-7]{55}/;
+export const SECRET_TEXT_MESSAGE = "That looks like a Stellar secret key (S…). Never paste it anywhere; PayBridge never needs it.";
+
+/** Free text (names, labels): trimmed, length-limited, and never a pasted secret key. */
+export const SafeText = (min: number, max: number, emptyMessage?: string) =>
+  z
+    .string()
+    .trim()
+    .min(min, emptyMessage)
+    .max(max)
+    .refine((v) => !SECRET_SEED.test(v), SECRET_TEXT_MESSAGE);
+
 export const IdSchema = z
   .string()
   .min(1)

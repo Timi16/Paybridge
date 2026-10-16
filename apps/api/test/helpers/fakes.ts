@@ -2,7 +2,7 @@ import type { Trustline } from "@paybridge/shared";
 import { TransactionBuilder, xdr, type Transaction } from "@stellar/stellar-sdk";
 import { formatStroops, parseAmount } from "../../src/lib/amount";
 import { AppError } from "../../src/lib/errors";
-import type { AccountState, FoundTransaction, LedgerInfo, StellarGateway, SubmitResult } from "../../src/stellar/gateway";
+import type { AccountState, FoundTransaction, LedgerInfo, StellarGateway, SubmitResult, TransactionLookup } from "../../src/stellar/gateway";
 
 export const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 export const FAKE_ISSUER = "GAGVZMODPYFTULIVSY3RGFADIC5LF4LLSN37N4MFWGNZ57TYBXL2LQQX";
@@ -71,7 +71,7 @@ export class FakeStellar implements StellarGateway {
   readonly txs = new Map<string, FoundTransaction>();
   /** Signed envelopes accepted with an "unknown" outcome, which can be landed later. */
   readonly inFlight: string[] = [];
-  /** Hashes a lagging Horizon node doesn't know about yet (getTransaction says 404). */
+  /** Hashes a lagging Horizon node doesn't know about yet: it answers 404 from a few ledgers behind. */
   readonly lagging = new Set<string>();
   ledger = 1000;
   ledgerTime = new Date();
@@ -152,10 +152,10 @@ export class FakeStellar implements StellarGateway {
     return { sequence: this.ledger, closedAt: this.ledgerTime };
   }
 
-  async getTransaction(hash: string): Promise<FoundTransaction | null> {
+  async getTransaction(hash: string): Promise<TransactionLookup> {
     if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
-    if (this.lagging.has(hash)) return null;
-    return this.txs.get(hash) ?? null;
+    if (this.lagging.has(hash)) return { found: null, nodeLedger: this.ledger - 3 };
+    return { found: this.txs.get(hash) ?? null, nodeLedger: this.ledger };
   }
 
   async submit(signedXdr: string): Promise<SubmitResult> {

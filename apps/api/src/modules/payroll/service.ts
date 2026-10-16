@@ -19,8 +19,15 @@ import { assignToBatch, finishIfDone, lockRun, recordEvent, transitionBatch, tra
 
 /** Most lines on one run. */
 export const MAX_RUN_LINES = 1000;
+/** Most runs one company can be paying at the same time. */
+export const MAX_PAYING_RUNS = 10;
 /** How long past its window a batch whose sequence number was used must stay unfound before it counts as expired. */
 export const EXPIRY_GRACE_MS = 2 * 60_000;
+/** Every expiry waits at least this long past the window, for ledgers still being ingested. */
+export const EXPIRY_MIN_GRACE_MS = 30_000;
+/** A signed batch with no answer is sent again at most this often. */
+const REBROADCAST_EVERY_MS = 30_000;
+const lastBroadcast = new Map<string, number>();
 
 const locked = (message = "This run can only be changed while it is a draft") => new AppError("RUN_LOCKED", message);
 const changedMeanwhile = () => locked("The run changed while PayBridge was checking it. Try again.");
@@ -168,28 +175,32 @@ export function createPayrollService(deps: AppDeps) {
   }
 
   /**
-   * Asks Stellar what became of an open batch and settles it if the answer is final.
-   *
-   * "Expired" must be certain, or the next batch would pay the same people again. So the account
-   * and the latest ledger are read BEFORE the hash is looked up (anything that landed by then is
-   * findable), and a batch whose sequence number the funding account has already used is only
-   * expired after a grace period: a lagging Horizon node can miss a transaction that did land.
+   * Asks Stellar what became of an open batch and settles it if the answer is final. Only the
+   * ledger's own record is final: found → confirmed or failed with its real close time. "Expired"
+   * must be certain, or the next batch would pay the same people again, so it needs all of:
+   *  - a ledger that closed after the batch's window (plus a grace period: 2 minutes when the
+   *    funding account has already used the batch's sequence number, 30 s otherwise),
+   *  - read BEFORE the hash lookup (anything landed by then is findable), and
+   *  - a "not found" from a Horizon node that had itself ingested at least that ledger.
    */
   async function resolveBatch(batch: PayrollBatch, actor: Actor): Promise<boolean> {
     const run = await prisma.payrollRun.findUnique({ where: { id: batch.runId }, select: { walletAddress: true } });
     if (!run) return false;
-    const account = await stellar.loadAccount(run.walletAddress);
     const ledger = await stellar.latestLedger();
-    const found = await stellar.getTransaction(batch.txHash);
+    const pastWindow = ledger.closedAt.getTime() > batch.maxTime.getTime() + EXPIRY_MIN_GRACE_MS;
+    // The account only matters for the expiry decision, so it is only read once that's possible.
+    const account = pastWindow ? await stellar.loadAccount(run.walletAddress) : null;
+    const { found, nodeLedger } = await stellar.getTransaction(batch.txHash);
     let outcome: BatchOutcome | null = null;
     if (found) {
       outcome = found.successful
         ? { kind: "success", ledger: found.ledger, closedAt: found.closedAt }
         : { kind: "failed", ...decodeResultXdr(found.resultXdr) };
-    } else {
+    } else if (pastWindow && account) {
       const sequenceUsed = account.exists && BigInt(account.sequence) >= BigInt(batch.sequence);
-      const deadline = batch.maxTime.getTime() + (sequenceUsed ? EXPIRY_GRACE_MS : 0);
-      if (ledger.closedAt.getTime() > deadline) outcome = { kind: "expired" };
+      const deadline = batch.maxTime.getTime() + (sequenceUsed ? EXPIRY_GRACE_MS : EXPIRY_MIN_GRACE_MS);
+      const nodeCaughtUp = nodeLedger === null ? false : nodeLedger >= ledger.sequence;
+      if (ledger.closedAt.getTime() > deadline && nodeCaughtUp) outcome = { kind: "expired" };
     }
     if (!outcome) return false;
     const settled = outcome;
@@ -197,18 +208,19 @@ export function createPayrollService(deps: AppDeps) {
   }
 
   /**
-   * Sends a signed batch to Stellar and records a final answer if there is one. A rejection before
-   * a ledger (bad sequence, fee, …) is never treated as final here: the same envelope could still
-   * land, so the batch stays SUBMITTED and resolveBatch settles it from the ledger.
+   * Sends a signed batch to Stellar. Whatever Horizon answers, the batch is settled only from the
+   * ledger's record (looked up straight away, then by the confirmer); a rejection is recorded so the
+   * company can see it, but never taken as proof the envelope can't land.
    */
   async function broadcast(batch: PayrollBatch, signedXdr: string, actor: Actor): Promise<void> {
     const result = await stellar.submit(signedXdr);
-    if (result.kind === "success") {
-      await inRunLock(batch.companyId, batch.runId, (tx) => settleBatch(tx, batch.id, { kind: "success", ledger: result.ledger, closedAt: result.closedAt }, actor));
-    } else if (result.kind === "failed" && result.txCode === "tx_failed") {
-      await inRunLock(batch.companyId, batch.runId, (tx) => settleBatch(tx, batch.id, result, actor));
-    } else if (result.kind === "failed") {
+    if (result.kind === "failed") {
       await prisma.payrollBatch.updateMany({ where: { id: batch.id, status: "SUBMITTED" }, data: { resultCode: result.txCode } });
+    }
+    if (result.kind !== "unknown") {
+      await resolveBatch({ ...batch, status: "SUBMITTED" }, actor).catch((err: unknown) =>
+        deps.logger.warn({ err, batchId: batch.id }, "submitted; the ledger record isn't readable yet"),
+      );
     }
   }
 
@@ -222,7 +234,9 @@ export function createPayrollService(deps: AppDeps) {
      */
     async confirm(batch: PayrollBatch): Promise<boolean> {
       if (await resolveBatch(batch, "system")) return true;
-      if (batch.status === "SUBMITTED" && batch.signedXdr && batch.maxTime.getTime() > Date.now()) {
+      const sentAt = Math.max(lastBroadcast.get(batch.id) ?? 0, batch.submittedAt?.getTime() ?? 0);
+      if (batch.status === "SUBMITTED" && batch.signedXdr && batch.maxTime.getTime() > Date.now() && Date.now() - sentAt >= REBROADCAST_EVERY_MS) {
+        lastBroadcast.set(batch.id, Date.now());
         await broadcast(batch, batch.signedXdr, "system");
         const after = await prisma.payrollBatch.findUnique({ where: { id: batch.id } });
         return after !== null && !isOpen(after);
@@ -368,6 +382,9 @@ export function createPayrollService(deps: AppDeps) {
       const run = await repo.findRun(prisma, companyId, id);
       if (!run) throw notFound("Payroll run");
       if (run.status !== "DRAFT") throw locked("This run has already been started");
+      if ((await prisma.payrollRun.count({ where: { companyId, status: "PAYING" } })) >= MAX_PAYING_RUNS) {
+        throw new AppError("LIMIT_REACHED", `You already have ${MAX_PAYING_RUNS} runs being paid. Finish or cancel one first.`);
+      }
       await activeWallet(companyId, run.walletId).catch(() => {
         throw new AppError("VALIDATION_FAILED", "This run's funding wallet was removed. Pick another one.", {
           details: [{ path: "walletId", message: "Funding wallet removed" }],
@@ -457,12 +474,14 @@ export function createPayrollService(deps: AppDeps) {
           let maxSeconds = Math.floor(Date.now() / 1000) + deps.batchWindowSeconds;
           if (last) maxSeconds = Math.max(maxSeconds, Math.floor(last.maxTime.getTime() / 1000) + 1);
           const maxTime = new Date(maxSeconds * 1000);
-          // A lagging Horizon node can report a sequence from before our last batch landed.
-          const landed = await tx.payrollBatch.findFirst({
-            where: { companyId, run: { walletAddress: current.walletAddress }, OR: [{ status: "CONFIRMED" }, { status: "FAILED", resultCode: "tx_failed" }] },
-            orderBy: { settledAt: "desc" },
+          // A lagging Horizon node can report a sequence from before our last batch landed: never
+          // build below the highest sequence this wallet is known to have used.
+          const landed = await tx.payrollBatch.findMany({
+            where: { companyId, run: { walletAddress: current.walletAddress }, OR: [{ status: "CONFIRMED" }, { status: "FAILED", ledger: { not: null } }] },
+            select: { sequence: true },
           });
-          const accountSequence = landed && BigInt(landed.sequence) > BigInt(funder.sequence) ? landed.sequence : funder.sequence;
+          const floor = landed.reduce((max, b) => (BigInt(b.sequence) > max ? BigInt(b.sequence) : max), BigInt(funder.sequence));
+          const accountSequence = floor.toString();
           const envelope = buildBatchTransaction({
             source: current.walletAddress,
             accountSequence,

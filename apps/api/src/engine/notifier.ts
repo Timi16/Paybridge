@@ -28,7 +28,11 @@ export async function notifyRuns(deps: NotifierDeps, limit = 25): Promise<number
   });
   let sent = 0;
   for (const run of runs) {
-    const claimed = await prisma.payrollRun.updateMany({ where: { id: run.id, notifiedAt: null }, data: { notifiedAt: new Date() } });
+    // Only the finish we read: a retry that reopened the run in the meantime is left for its next finish.
+    const claimed = await prisma.payrollRun.updateMany({
+      where: { id: run.id, notifiedAt: null, status: run.status, finishedAt: run.finishedAt },
+      data: { notifiedAt: new Date() },
+    });
     if (claimed.count === 0) continue;
     const company = run.company;
     if (company.closedAt) continue;

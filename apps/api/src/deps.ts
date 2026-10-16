@@ -9,6 +9,8 @@ export interface Limits {
   /** Other /auth routes (me, logout): per IP per minute. */
   authReadPerMin: number;
   v1PerMin: number;
+  /** Routes that check many wallets on Horizon (check, start, next batch, retry, employee checks): per company per minute. */
+  stellarHeavyPerMin: number;
   /** Pre-auth ceiling on /v1 per IP, so bad keys can't hammer the DB. */
   v1PerIpPerMin: number;
 }
@@ -17,6 +19,7 @@ export const DEFAULT_LIMITS: Limits = {
   authPerMin: 5,
   authReadPerMin: 60,
   v1PerMin: 300,
+  stellarHeavyPerMin: 20,
   v1PerIpPerMin: 1000,
 };
 

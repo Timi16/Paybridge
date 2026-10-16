@@ -1,14 +1,14 @@
 import { z } from "zod";
-import { AmountSchema, IdSchema, PaginationQuery, RECEIVE_PROBLEMS } from "./common";
+import { AmountSchema, IdSchema, PaginationQuery, RECEIVE_PROBLEMS, SafeText } from "./common";
 
-const Name = z.string().trim().min(1, "Enter a name").max(100);
+const Name = SafeText(1, 100, "Enter a name");
 const Email = z.string().trim().toLowerCase().email("Enter a valid email").max(254);
-const Role = z.string().trim().min(1).max(64);
+const Role = SafeText(1, 64);
 const WalletAddress = z.string().trim().min(1, "Enter a Stellar address").max(100);
 
 // ---------- groups ----------
 
-export const GroupNameBody = z.object({ name: z.string().trim().min(1, "Enter a name").max(50) }).strict();
+export const GroupNameBody = z.object({ name: SafeText(1, 50, "Enter a name") }).strict();
 export type GroupNameBody = z.infer<typeof GroupNameBody>;
 
 export const GroupSchema = z.object({
@@ -61,7 +61,7 @@ export const ImportEmployeesBody = z
             role: Role.nullable().optional(),
             walletAddress: WalletAddress,
             defaultAmount: AmountSchema,
-            group: z.string().trim().min(1).max(50).nullable().optional(),
+            group: SafeText(1, 50).nullable().optional(),
           })
           .strict(),
       )
