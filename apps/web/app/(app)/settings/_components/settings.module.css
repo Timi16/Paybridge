@@ -79,7 +79,7 @@
 .letters { display: flex; gap: 6px; }
 .letter { width: 30px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--row); color: var(--slate-soft); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; transition: background-color 0.2s var(--ease-out), color 0.2s var(--ease-out), border-color 0.2s var(--ease-out), transform 0.3s var(--ease-spring); }
 .letterOn { background: var(--bad-bg); border-color: var(--alert-border); color: var(--bad); transform: translateY(-2px) scale(1.06); }
-.closeBtn { background: var(--border); color: #64748b; opacity: 1 !important; transition: background-color 0.3s var(--ease-out), color 0.3s var(--ease-out), transform 0.3s var(--ease-spring), box-shadow 0.3s var(--ease-out); }
+.closeBtn { background: var(--border); color: var(--ink-3); opacity: 1 !important; transition: background-color 0.3s var(--ease-out), color 0.3s var(--ease-out), transform 0.3s var(--ease-spring), box-shadow 0.3s var(--ease-out); }
 .closeBtnOn { background: var(--error); color: #fff; animation: unlock 0.4s var(--ease-spring); }
 @keyframes unlock { 0% { transform: scale(0.94); } 60% { transform: scale(1.05); } 100% { transform: scale(1); } }
 

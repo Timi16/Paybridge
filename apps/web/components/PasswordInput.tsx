@@ -50,7 +50,7 @@ const HINTS = ["At least 10 characters", "Too short — at least 10 characters",
 
 export function StrengthMeter({ password, id }: { password: string; id?: string }) {
   const strength = passwordStrength(password);
-  const colour = (n: number) => (strength >= n ? (strength === 1 ? "#F59E0B" : "var(--teal)") : "var(--border)");
+  const colour = (n: number) => (strength >= n ? (strength === 1 ? "var(--testnet)" : "var(--teal)") : "var(--border)");
   return (
     <>
       <div style={{ display: "flex", gap: 4 }} aria-hidden="true">

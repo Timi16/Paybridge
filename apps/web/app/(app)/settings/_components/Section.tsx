@@ -16,11 +16,11 @@ export function Section({ title, sub, children, id, danger, gap = 16 }: Props) {
       id={id}
       aria-label={title}
       className="card"
-      style={{ padding: 22, display: "flex", flexDirection: "column", gap, scrollMarginTop: 16, ...(danger ? { borderColor: "var(--alert-border)" } : {}) }}
+      style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap, scrollMarginTop: 16, ...(danger ? { borderColor: "var(--alert-border)" } : {}) }}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 800, ...(danger ? { color: "var(--error)" } : {}) }}>{title}</h2>
-        {sub ? <span style={{ fontSize: 13, color: "var(--slate)" }}>{sub}</span> : null}
+        <h2 className="h2" style={{ fontSize: 26, ...(danger ? { color: "var(--failed)" } : {}) }}>{title}</h2>
+        {sub ? <span style={{ fontSize: 14, color: "var(--ink-2)", maxWidth: 640 }}>{sub}</span> : null}
       </div>
       {children}
     </section>

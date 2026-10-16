@@ -8,7 +8,6 @@ import { connectFreighter, FreighterError, signMessageWithFreighter } from "@/li
 import type { ChallengeResponse, Wallet } from "@/lib/types";
 
 /** The real USDC issuer on Stellar Testnet (Circle). */
-export const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
 export const walletName = (w: Pick<Wallet, "label" | "address">) => w.label || shortAddress(w.address, 6, 7);
 
@@ -39,7 +38,7 @@ function verifyErrorMessage(err: unknown): string {
 }
 
 /**
- * Proves a wallet is the merchant's: asks the API for a one-time message, has Freighter sign
+ * Proves a wallet is the company's: asks the API for a one-time message, has Freighter sign
  * it with that wallet's account, and sends the signature back. Signing moves no money.
  * Resolves to the verified wallet, or null when it failed (the reason is in `state.error`).
  */

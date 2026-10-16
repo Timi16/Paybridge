@@ -1,74 +1,52 @@
 "use client";
 
 import Link from "next/link";
-import { Burst } from "@/app/(auth)/_ui/AuthCentred";
 import { Icon } from "@/components/Icon";
-import { useNewRequest } from "@/components/NewRequest";
-import { shortAddress } from "@/lib/format";
-import type { Merchant, Wallet } from "@/lib/types";
+import type { Company, Wallet } from "@/lib/types";
 import styles from "../onboarding.module.css";
 
-function assetLine(merchant: Merchant): string {
-  const other = merchant.defaultAsset === "USDC" ? "XLM" : "USDC";
-  return merchant.acceptedAssets === "BOTH" ? `${merchant.defaultAsset} (${other} accepted too)` : merchant.defaultAsset;
-}
-
-export function StepDone({ merchant, wallets, className }: { merchant: Merchant; wallets: Wallet[]; className: string }) {
-  const newRequest = useNewRequest();
-  const wallet = wallets.find((w) => w.id === merchant.defaultWalletId) ?? wallets[0];
-
+/** Two next steps: add people, then draft the first run. */
+export function StepDone({ company, className }: { company: Company; wallets: Wallet[]; className: string }) {
   return (
     <div className={className}>
       <div className={styles.head}>
-        <h1 className="h1">You are set up</h1>
-        <span className="sub">Test mode is on. Here is what you can do first.</span>
+        <span className="eyebrow">Step 3 of 3</span>
+        <h1 className="h1" style={{ fontSize: 40 }}>
+          {company.businessName} is <em>ready</em>.
+        </h1>
+        <p className="sub">Add the people you pay, then draft your first run. Nothing moves until you sign it in Freighter.</p>
       </div>
-      <div className={styles.summary}>
-        <Burst size={44} />
-        <div className={styles.summaryText}>
-          <span style={{ fontWeight: 800, overflowWrap: "anywhere" }}>
-            {merchant.businessName}
-            {wallet ? (
-              <>
-                {" "}
-                · settles to{" "}
-                <span className="mono" style={{ fontWeight: 600 }} title={wallet.address}>
-                  {shortAddress(wallet.address)}
-                </span>
-              </>
-            ) : null}
+      <ol className="stagger" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+        <li className="sheet sheet-pad" style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="date-tile" aria-hidden="true">
+            <b>STEP</b>
+            <span>1</span>
           </span>
-          <span style={{ fontSize: 13, color: "var(--slate)" }}>{assetLine(merchant)} on Stellar Testnet · we watch this account for payments with your memos</span>
-        </div>
-      </div>
-      <div className={`${styles.cards} stagger`}>
-        <button type="button" className={`card lift ${styles.tile}`} onClick={() => newRequest()}>
-          <span className={styles.tileIcon}>
-            <Icon name="plus" size={20} />
+          <div style={{ flex: "1 1 220px" }}>
+            <strong style={{ fontSize: 16 }}>Add your people</strong>
+            <p className="muted" style={{ fontSize: 14 }}>Name, Stellar wallet and default amount. Group them (Engineering, Contractors…) or import a spreadsheet.</p>
+          </div>
+          <Link href="/people" className="btn btn-dark">
+            <Icon name="people" size={16} /> Add people
+          </Link>
+        </li>
+        <li className="sheet sheet-pad" style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="date-tile" aria-hidden="true">
+            <b>STEP</b>
+            <span>2</span>
           </span>
-          <span style={{ fontWeight: 800 }}>Create a request</span>
-          <span className={styles.tileSub}>Amount, asset, wallet → link.</span>
-        </button>
-        <Link href="/settings" className={`card lift ${styles.tile}`}>
-          <span className={styles.tileIcon}>
-            <Icon name="wallets" size={20} />
-          </span>
-          <span style={{ fontWeight: 800 }}>Add more wallets</span>
-          <span className={styles.tileSub}>Pick a receiving wallet per request.</span>
-        </Link>
-        <button type="button" className={`card lift ${styles.tile}`} onClick={() => newRequest()}>
-          <span className={styles.tileIcon}>
-            <Icon name="qr" size={20} />
-          </span>
-          <span style={{ fontWeight: 800 }}>Try the pay page</span>
-          <span className={styles.tileSub}>Create a request, then open its link to see what your customer sees. Pay it yourself with Friendbot money.</span>
-        </button>
-      </div>
-      <div className={styles.actions}>
-        <Link href="/dashboard" className="btn btn-primary" style={{ fontSize: 15 }}>
-          Go to dashboard
-        </Link>
-      </div>
+          <div style={{ flex: "1 1 220px" }}>
+            <strong style={{ fontSize: 16 }}>Draft your first payroll</strong>
+            <p className="muted" style={{ fontSize: 14 }}>Pick groups or people, adjust amounts, check the total, then sign once to pay everyone.</p>
+          </div>
+          <Link href="/payroll?new=1" className="btn btn-primary">
+            <Icon name="payroll" size={16} /> New payroll
+          </Link>
+        </li>
+      </ol>
+      <Link href="/dashboard" className="btn-link" style={{ alignSelf: "flex-start" }}>
+        Go to the overview
+      </Link>
     </div>
   );
 }

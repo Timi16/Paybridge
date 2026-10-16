@@ -7,7 +7,7 @@ import { useSWRConfig } from "swr";
 import { AuthHero } from "@/components/AuthHero";
 import { PasswordInput } from "@/components/PasswordInput";
 import { api, ApiError, errorMessage } from "@/lib/api";
-import type { Merchant } from "@/lib/types";
+import type { Company } from "@/lib/types";
 import { useShake } from "../_ui/useShake";
 import styles from "../auth.module.css";
 
@@ -48,9 +48,9 @@ function LoginForm() {
     setBusy(true);
     setProblem(null);
     try {
-      const res = await api.post<{ merchant: Merchant }>("/auth/login", { email: email.trim(), password, remember });
+      const res = await api.post<{ company: Company }>("/auth/login", { email: email.trim(), password, remember });
       await mutate("/auth/me", res, { revalidate: false });
-      router.replace(res.merchant.emailVerified ? safeNext(params.get("next")) : "/verify-email");
+      router.replace(res.company.emailVerified ? safeNext(params.get("next")) : "/verify-email");
     } catch (err) {
       if (err instanceof ApiError && err.code === "INVALID_CREDENTIALS") {
         fail({ text: "That email and password don't match. Try again or reset your password.", field: "both" });

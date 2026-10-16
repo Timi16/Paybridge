@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { errorMessage } from "@/lib/api";
 import { useMe, useWallets } from "@/lib/session";
-import type { Merchant, Wallet } from "@/lib/types";
+import type { Company, Wallet } from "@/lib/types";
 import { businessStepSeen, CheckIcon, type StepNumber } from "./_components/shared";
 import { StepBusiness } from "./_components/StepBusiness";
 import { StepDone } from "./_components/StepDone";
@@ -11,14 +11,14 @@ import { StepWallet } from "./_components/StepWallet";
 import styles from "./onboarding.module.css";
 
 const STEPS: { n: StepNumber; title: string; sub: string }[] = [
-  { n: 1, title: "Business", sub: "Name and brand" },
-  { n: 2, title: "Settlement wallet", sub: "Where money lands" },
-  { n: 3, title: "Done", sub: "First steps" },
+  { n: 1, title: "Company", sub: "Who is paying" },
+  { n: 2, title: "Funding wallet", sub: "Where pay comes from" },
+  { n: 3, title: "Done", sub: "Your first payroll" },
 ];
 
-function Flow({ merchant, wallets }: { merchant: Merchant; wallets: Wallet[] }) {
+function Flow({ company, wallets }: { company: Company; wallets: Wallet[] }) {
   // Where to land comes from what is already saved: a wallet means both steps are done.
-  const [step, setStep] = useState<StepNumber>(() => (wallets.length > 0 ? 3 : merchant.businessName.trim() && businessStepSeen(merchant.id) ? 2 : 1));
+  const [step, setStep] = useState<StepNumber>(() => (wallets.length > 0 ? 3 : company.businessName.trim() && businessStepSeen(company.id) ? 2 : 1));
   const [dir, setDir] = useState<"next" | "back">("next");
 
   const go = (to: StepNumber) => {
@@ -68,25 +68,25 @@ function Flow({ merchant, wallets }: { merchant: Merchant; wallets: Wallet[] }) 
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3zM9 12l2 2 4-4" />
           </svg>
-          PayBridge never asks for a secret key. Only the public address of the wallet you want paid.
+          PayBridge never asks for a secret key. You sign every payroll yourself, in Freighter.
         </div>
       </div>
       {step === 1 ? (
-        <StepBusiness key="1" merchant={merchant} className={panel} onDone={() => go(2)} />
+        <StepBusiness key="1" company={company} className={panel} onDone={() => go(2)} />
       ) : step === 2 ? (
-        <StepWallet key="2" merchant={merchant} wallets={wallets} className={panel} onBack={() => go(1)} onDone={() => go(3)} />
+        <StepWallet key="2" company={company} wallets={wallets} className={panel} onBack={() => go(1)} onDone={() => go(3)} />
       ) : (
-        <StepDone key="3" merchant={merchant} wallets={wallets} className={panel} />
+        <StepDone key="3" company={company} wallets={wallets} className={panel} />
       )}
     </div>
   );
 }
 
 export default function OnboardingPage() {
-  const { merchant } = useMe();
+  const { company } = useMe();
   const { data, error, isLoading, mutate } = useWallets();
 
-  if (!merchant) return null;
+  if (!company) return null;
   if (!data) {
     if (error && !isLoading) {
       return (
@@ -112,5 +112,5 @@ export default function OnboardingPage() {
       </div>
     );
   }
-  return <Flow merchant={merchant} wallets={data.data} />;
+  return <Flow company={company} wallets={data.data} />;
 }

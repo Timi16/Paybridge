@@ -32,9 +32,8 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
-      // The session is an httpOnly cookie on the API's origin. Public checkout routes are
-      // open to any origin and take no cookie; browsers refuse credentials against them.
-      credentials: path.startsWith("/public/") ? "omit" : "include",
+      // The session is an httpOnly cookie on the API's origin.
+      credentials: "include",
       headers: { ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}), ...opts.headers },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       signal: opts.signal,
@@ -68,6 +67,7 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
 export const api = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
   post: <T>(path: string, body?: unknown, opts?: RequestOptions) => request<T>("POST", path, { ...opts, body }),
+  patch: <T>(path: string, body?: unknown, opts?: RequestOptions) => request<T>("PATCH", path, { ...opts, body }),
   delete: <T = void>(path: string, opts?: RequestOptions) => request<T>("DELETE", path, opts),
 };
 

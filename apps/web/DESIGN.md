@@ -1,60 +1,85 @@
 # PayBridge web: design system
 
-Direction E, "bank-grade": calm, exact, trustworthy. Source of the design: the PayBridge canvas
-(page "PayBridge · E"). Tokens live in `app/globals.css`; this file is the summary.
+Direction **"Pay stub"**: warm paper, forest-green ink, ledger figures. A payroll run is a document
+you can trust: totals sit on a double rule, every payment has a status word and a hash.
+
+Chosen on 16 Oct 2026 over a dark "Manifest" direction (graphite, lime, condensed caps) by three
+judge agents. Payroll operator, visual craft and accessibility all picked Pay stub: it reads as an
+accounting tool rather than a trading terminal, fits 390 px, and needed only token fixes for AA.
+From Manifest we kept the row index (01, 02…), the boxed facts strip and the joined segmented filter.
+Tokens live in `app/globals.css`; this file is the summary.
 
 ## Colour
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| `--teal` | `#1E4FD6` | Primary actions, links, the mark |
-| `--teal-hover` | `#1434A4` | Hover |
-| `--teal-deep` | `#1434A4` | Text on teal tint |
-| `--teal-tint` | `#E9EEFC` | Good-status fills, active nav |
-| `--ink` | `#0F172A` | Text, dark buttons |
-| `--slate` | `#475569` | Secondary text |
-| `--canvas` | `#F4F6F8` | Page background |
-| `--surface` | `#FFFFFF` | Cards |
-| `--border` | `#E2E8F0` | Card and control borders |
-| `--border-soft` | `#EEF2F6` | Row dividers |
-| `--attention-*` | `#FFFBEB` / `#8A4B08` / `#F3D38B` | Needs-you, testnet tag |
-| `--warn-bg` | `#FEF3C7` | Underpaid, refund owed |
-| `--danger-*` | `#FEE2E2` / `#991B1B` | Unmatched, wrong asset |
-| `--error` | `#B91C1C` | Field errors |
-| `--night` | `#0B1220` | Auth hero, landing dark sections |
+| `--paper` | `#F5F1E8` | Page background |
+| `--sheet` | `#FFFDF8` | Cards, documents, dialogs |
+| `--sunken` | `#EFEADF` | Hover on nav and icon buttons |
+| `--rule` / `--rule-soft` | `#DCD5C5` / `#E9E3D6` | Card borders / row dividers |
+| `--rule-strong` | `#8C8579` | Input, select, chip and secondary-button borders (≥ 3:1) |
+| `--ink` / `--ink-2` / `--ink-3` | `#1B2620` / `#4A5650` / `#666D68` | Text: primary / secondary / labels (all ≥ 4.5:1 on paper and sheet) |
+| `--green` / `--green-hover` / `--green-tint` | `#0F6B4B` / `#0B4F38` / `#E2EFE7` | Primary action, links, focus ring, the mark |
+| `--night` | `#14201A` | Auth panel, landing "Safety" band |
+| Paid | `#0F6B4B` on `#E2EFE7` | |
+| Sending / in flight | `#8A5A0B` on `#F7EBCF`; ticks striped `#9A7B2C` | |
+| Not sent / failed | `#A2361F` on `#F6E0D8`; callout text `#6E2414` | |
+| Waiting for signature / info | `#2E4A7A` on `#E4EAF3` | |
+| Draft / to pay / cancelled | `#4A5650` on `#ECE7DC` | |
+| Testnet dot | `#C98A1B` | The permanent "Stellar Testnet · no real money" badge |
 
-Light only. Status is never colour alone: every pill has an icon and a word.
+Light only. Status is never colour alone: every pill has an icon and a word, and the tick bar is
+always accompanied by its counts in text.
 
 ## Type
 
-- **Plus Jakarta Sans** 400–800 for everything. Page title 28/800/-0.02em; card title 17/700; body 14; small 12–13.
-- **IBM Plex Mono** for memos, amounts in tables, addresses and hashes.
-- Amounts use tabular figures. Amounts are decimal strings; never parse them into floats.
+- **Instrument Serif** (400, italic for emphasis) for page titles (44 / 34 mobile), section titles (26–28) and headline money (KPIs 40, run total up to 56). Nothing else.
+- **Hanken Grotesk** for everything else: body 14–15, labels 13/600, eyebrows 11/600 caps +0.12em.
+- **JetBrains Mono** for every amount in a list, addresses, hashes, memo text, row numbers.
+- Rule: an amount is either serif (headline) or mono (ledger), never sans. Amounts are decimal strings end to end; `parseFloat`/`Number()` on amounts are banned (ESLint).
 
 ## Shape and spacing
 
-- Radius: cards 14, auth cards 18, buttons and inputs 10, large buttons 12, pills 6, nav items 8.
-- Controls are 46 px tall (50 px for the one main action on a form); small buttons 36.
-- Page padding 32/40, card padding 18/20, gaps 12/16/24.
+- Sheets, dialogs, callouts: radius 4. Inputs and selects: 6. Buttons, chips, pills, segmented controls: 999.
+- Buttons 44 px (52 for the one main action on a screen), small 36. Nav items 44.
+- Sheet padding 24/28 (20 on mobile). Page gutter 44 (16 on mobile). One shadow: `--shadow-sheet`.
+- Below 640 px, tables become stacked rows (`.table.stack`): name and amount on top, status, reason and tx hash below. The tx hash and failure reason are never hidden.
 
-## Components (classes in `globals.css`)
+## Signature details (use them only where they mean something)
 
-`.btn` + `.btn-primary | .btn-secondary | .btn-dark | .btn-danger | .btn-link`, sizes `.btn-lg | .btn-sm | .btn-block`;
-`.field`, `.label`, `.input`, `.select`, `.textarea`, `.hint`, `.field-error`; `.alert`, `.notice`, `.success`;
-`.card`, `.card-pad`; `.pill` + `.pill-neutral | -good | -warn | -muted | -danger`; `.table` in `.table-wrap`;
-`.seg` (segmented control, buttons with `aria-pressed`); `.page-head`, `.h1`, `.h2`, `.sub`; `.empty`; `.skeleton`.
+1. **Perforated edge** (`.stub`) on documents only: a payroll run, the review-and-pay step, the landing demo.
+2. **Double rule** (`.total-rule`) under a binding total: the run total, the review total, the new-run total.
+3. **Tick bar** (`<Ticks>`): one tick per person in paid / sending (striped) / not sent / to pay. Above 120 people it becomes a joined bar.
+4. **Date tile** (`.date-tile`) for a scheduled pay date.
 
-React: `Logo`, `LogoMark`, `Icon`, `Pill`, `RequestStatusPill`, `OutcomePill`, `CopyButton`, `PasswordInput`,
-`Dialog`, `Toast` (`useToast`), `AppShell`.
+## Components
+
+CSS (in `globals.css`): `.btn` + `.btn-primary | -dark | -secondary | -danger | -link`, `.btn-lg | -sm`;
+`.field .label .input .select .textarea .hint .field-error .check`; callouts `.alert .notice .success .info-note`;
+`.sheet .card .sheet-pad .stub .tear .divider .total-rule .ledger`; `.pill-good | -warn | -danger | -info | -muted | -brand`,
+`.chip-tag`, `.tag-testnet`; `.ticks`; `.table .table.stack .idx .num .who .hash .why`; `.seg`; `.page-head .h1 .h2 .eyebrow .money .unit`;
+`.date-tile`, `.empty`, `.skeleton`, `.spinner`, `.facts`, `.run-head`, `.run-totals`.
+
+React: `Logo`, `LogoMark`, `Icon`, `Pill`, `RunStatusPill`, `ItemStatusPill`, `BatchStatusPill`, `Money`, `Ticks`,
+`NewRunDialog`, `CopyButton`, `PasswordInput`, `Dialog`, `Toast` (`useToast`), `AppShell`.
+Status words, tones and failure explanations live in `lib/payroll.ts`.
+
+## Motion
+
+Calm and quick: pages rise in once, ticks grow in, pills pop when a status changes. Everything is off
+under `prefers-reduced-motion` except "working" spinners. Live updates poll every 2 s only while money
+is moving, and the run's counts are announced in one polite `aria-live` line, not row by row.
 
 ## Voice
 
-Plain and specific. Say what happened and what to do next: "20.00 USDC is still due", "Send it back
-from your wallet". No jargon the merchant doesn't need (say "applied", not "COUNTED"). PayBridge never
-moves money, so never imply it does: refunds are "send it back from your wallet, then mark it here".
+Plain and specific, about money and people: "1 payment wasn't sent: 1,750.00 USDC. Nothing was sent to
+Tomás Reyes. Their wallet can't hold USDC yet…". Say what happened, whether money moved, and what to do
+next. Never imply PayBridge holds funds or keys: "Sign in Freighter", "Your keys never leave Freighter".
+No pronouns guessed for people on a run; use their name or "they".
 
 ## Rules
 
-- Real `<button>`, `<a>`, `<label for>`; dialogs trap focus and close on Escape.
+- Real `<button>`, `<a>`, `<label for>`; dialogs trap focus and close on Escape; focus ring 2 px green, offset 2.
 - Every list has loading, empty and error states.
-- The permanent "Stellar Testnet · no real money" marker stays on the checkout and in the app shell.
+- The "Stellar Testnet · no real money" badge is always visible in the app (top bar, also on mobile).
+- A pasted secret key (S…) is cleared from the field and never sent anywhere.

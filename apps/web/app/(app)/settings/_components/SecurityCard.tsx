@@ -9,7 +9,7 @@ import { useToast } from "@/components/Toast";
 import { api, errorMessage } from "@/lib/api";
 import { API_URL } from "@/lib/config";
 import { formatDate, timeAgo } from "@/lib/format";
-import { useNow } from "@/lib/live";
+import { useNow } from "@/lib/hooks";
 import type { Session } from "@/lib/types";
 import { describeDevice, DEVICE_ICON } from "./device";
 import { PasswordForm } from "./PasswordForm";

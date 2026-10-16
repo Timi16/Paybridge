@@ -1,3 +1,5 @@
+import { formatStroops, parseAmount } from "@paybridge/shared";
+
 // Amounts stay decimal strings end to end: nothing here goes through a float.
 
 /** "50.0000000" -> "50.00", "1840.5" -> "1,840.50", "0.0000001" -> "0.0000001". */
@@ -83,8 +85,18 @@ export function initials(name: string): string {
   return letters.toUpperCase();
 }
 
-/** Decimal string -> stroops (7 decimals) as a bigint, for comparing amounts exactly. */
-export function toStroops(amount: string): bigint {
-  const [whole = "0", frac = ""] = amount.split(".");
-  return BigInt(whole) * 10_000_000n + BigInt(frac.padEnd(7, "0").slice(0, 7));
+/** Sum of decimal strings, exactly (through bigint stroops). Unreadable values count as 0. */
+export function sumAmounts(amounts: string[]): string {
+  return formatStroops(amounts.reduce((sum, a) => sum + (parseAmount(a) ?? 0n), 0n));
+}
+
+/** "October payroll" → a stable month label "Oct 2026" for "YYYY-MM". */
+export function monthLabel(yyyyMm: string, style: "short" | "long" = "short"): string {
+  const [y = "2000", m = "1"] = yyyyMm.split("-");
+  return new Date(Date.UTC(Number.parseInt(y, 10), Number.parseInt(m, 10) - 1, 1)).toLocaleDateString("en-GB", { month: style, timeZone: "UTC" });
+}
+
+/** A plain date (YYYY-MM-DD) shown as "31 Oct 2026", without timezone drift. */
+export function formatDay(day: string): string {
+  return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }

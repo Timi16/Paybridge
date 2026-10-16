@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { formatAmount, toStroops } from "@/lib/format";
+import { parseAmount } from "@paybridge/shared";
+import { formatAmount } from "@/lib/format";
 
 const DURATION = 900;
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
@@ -38,7 +39,7 @@ function useProgress(key: string): number {
  */
 export function CountUpAmount({ value, minDecimals = 2 }: { value: string; minDecimals?: number }) {
   const progress = useProgress(value);
-  const target = toStroops(value);
+  const target = parseAmount(value) ?? 0n;
   const shown = progress >= 1 ? target : (target * BigInt(Math.round(progress * 1000))) / 1000n;
   // While counting, hide stroop-level noise; the final frame shows the exact value.
   const text = progress >= 1 ? formatAmount(value, minDecimals) : formatAmount(stroopsToDecimal(shown - (shown % 100_000n)), minDecimals);

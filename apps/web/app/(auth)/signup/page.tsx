@@ -7,7 +7,7 @@ import { useSWRConfig } from "swr";
 import { AuthHero } from "@/components/AuthHero";
 import { PasswordInput, StrengthMeter } from "@/components/PasswordInput";
 import { api, ApiError, errorMessage } from "@/lib/api";
-import type { Merchant } from "@/lib/types";
+import type { Company } from "@/lib/types";
 import { useShake } from "../_ui/useShake";
 import styles from "../auth.module.css";
 
@@ -43,9 +43,9 @@ export default function SignupPage() {
     setError(null);
     setEmailTaken(false);
     try {
-      const res = await api.post<{ merchant: Merchant }>("/auth/signup", { businessName: biz.trim(), email: email.trim(), password });
+      const res = await api.post<{ company: Company }>("/auth/signup", { businessName: biz.trim(), email: email.trim(), password });
       await mutate("/auth/me", res, { revalidate: false });
-      router.replace(res.merchant.emailVerified ? "/onboarding" : "/verify-email");
+      router.replace(res.company.emailVerified ? "/onboarding" : "/verify-email");
     } catch (err) {
       if (err instanceof ApiError && err.code === "EMAIL_TAKEN") setEmailTaken(true);
       else setError(errorMessage(err));
@@ -71,7 +71,7 @@ export default function SignupPage() {
           <form onSubmit={submit} noValidate className={styles.form}>
             <div className="field">
               <label htmlFor="biz" className="label">
-                Business name
+                Company name
               </label>
               <div className={shakeClass(bizBad)}>
                 <input
@@ -90,7 +90,7 @@ export default function SignupPage() {
               </div>
               {bizBad ? (
                 <span id="biz-error" role="alert" className="field-error">
-                  Tell us the business name customers will see on checkout.
+                  Tell us your companyTell us the business name customers will see on checkout.apos;s name.
                 </span>
               ) : null}
             </div>

@@ -1,14 +1,14 @@
 "use client";
 
-import type { Merchant } from "@/lib/types";
+import type { Company } from "@/lib/types";
 import { Section, SwitchRow } from "./Section";
 import { useSaveSetting } from "./useSaveSetting";
 
 /** Two email switches. Each saves the moment it is flipped. */
-export function NotificationsCard({ merchant }: { merchant: Merchant }) {
-  const { save, error } = useSaveSetting(merchant);
+export function NotificationsCard({ company }: { company: Company }) {
+  const { save, error } = useSaveSetting(company);
   return (
-    <Section title="Notifications" sub={<>Email to {merchant.email}.</>}>
+    <Section title="Notifications" sub={<>Email to {company.email}.</>}>
       {error ? (
         <div role="alert" className="alert">
           {error}
@@ -16,16 +16,16 @@ export function NotificationsCard({ merchant }: { merchant: Merchant }) {
       ) : null}
       <div style={{ display: "flex", flexDirection: "column" }}>
         <SwitchRow
-          label="Every payment"
-          description="One email the moment a request is verified as Paid."
-          checked={merchant.notifyPaid}
-          onChange={(on) => void save({ notifyPaid: on }, on ? "You'll get an email for every payment" : "Payment emails are off")}
+          label="Run paid"
+          description="One email when a payroll run finishes with everyone paid, with the link to every transaction."
+          checked={company.notifyPaid}
+          onChange={(on) => void save({ notifyPaid: on }, on ? "You'll get an email when a run is paid" : "Run-paid emails are off")}
         />
         <SwitchRow
-          label="Problems"
-          description="Underpaid, wrong asset, paid late, paid twice, or a payment we couldn't match to a request."
-          checked={merchant.notifyProblems}
-          onChange={(on) => void save({ notifyProblems: on }, on ? "You'll get an email when something needs a look" : "Problem emails are off")}
+          label="Payments not sent"
+          description="One email when a run finishes with people who couldn't be paid, and why (for example, no USDC trustline)."
+          checked={company.notifyProblems}
+          onChange={(on) => void save({ notifyProblems: on }, on ? "You'll get an email when payments aren't sent" : "Those emails are off")}
         />
       </div>
     </Section>

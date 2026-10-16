@@ -4,7 +4,7 @@ import styles from "@/app/(auth)/auth.module.css";
 import { useReducedMotion } from "@/app/(auth)/_ui/useReducedMotion";
 import { Logo } from "./Logo";
 
-const POINTS = ["Non-custodial · funds never pass through us", "USDC and XLM on Stellar Testnet today", "Pending → Paid with the transaction hash"];
+const POINTS = ["Non-custodial · you sign every payroll in Freighter", "Checked before you sign, so nobody is paid twice", "Paid or Not sent, with the transaction hash"];
 
 const at = (i: number) => ({ "--i": i }) as React.CSSProperties;
 
@@ -18,21 +18,19 @@ export function AuthHero() {
         <span className={`${styles.blob} ${styles.blobA}`} />
         <span className={`${styles.blob} ${styles.blobB}`} />
         <svg className={styles.arch} viewBox="0 0 500 200" fill="none" stroke="currentColor" strokeLinecap="round">
-          <path className={styles.archLine} pathLength={1} d="M20 180V150C120 20 380 20 480 150V180" strokeWidth="6" />
-          <path className={styles.archLine} pathLength={1} d="M8 180H492" strokeWidth="6" />
-          <path className={styles.archLine} pathLength={1} d="M130 180V96M250 180V54M370 180V96" strokeWidth="4" />
-          <circle className={styles.archDot} r="7" fill="currentColor" stroke="none" />
+          <path className={styles.archLine} pathLength={1} d="M20 120H480" strokeWidth="6" />
+          <path className={styles.archLine} pathLength={1} d="M20 150H480" strokeWidth="6" />
         </svg>
       </div>
       <div className={styles.in} style={at(0)}>
-        <Logo on="dark" size={34} fontSize={21} animated={!reduced} style={{ display: "inline-flex" }} />
+        <Logo on="dark" size={30} fontSize={28} animated={!reduced} style={{ display: "inline-flex" }} />
       </div>
       <div className={styles.heroBody}>
         <h2 className={`${styles.heroTitle} ${styles.in}`} style={at(1)}>
-          Stellar payments, straight to your wallet.
+          Pay everyone. Sign once.
         </h2>
         <p className={`${styles.heroText} ${styles.in}`} style={at(2)}>
-          Payment links, a pay page and verification on the ledger. You keep the keys and the money, PayBridge does the checking.
+          Payroll in USDC on Stellar. You keep the keys and the money; PayBridge checks every wallet, builds the transaction and tracks each payment to its hash.
         </p>
         <ul className={styles.heroList}>
           {POINTS.map((line, i) => (

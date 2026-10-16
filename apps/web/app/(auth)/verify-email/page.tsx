@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/Icon";
 import { api, ApiError, errorMessage } from "@/lib/api";
 import { useLogout, useMe } from "@/lib/session";
-import type { Merchant } from "@/lib/types";
+import type { Company } from "@/lib/types";
 import { AuthCentred, Burst } from "../_ui/AuthCentred";
 import { useReducedMotion } from "../_ui/useReducedMotion";
 import { useShake } from "../_ui/useShake";
@@ -16,7 +16,7 @@ const BOXES = [0, 1, 2, 3, 4, 5] as const;
 
 export default function VerifyEmailPage() {
   const router = useRouter();
-  const { merchant, mutate } = useMe();
+  const { company, mutate } = useMe();
   const logout = useLogout();
   const reduced = useReducedMotion();
   const { shake, shakeClass } = useShake();
@@ -38,10 +38,10 @@ export default function VerifyEmailPage() {
   }, [busy, error]);
 
   useEffect(() => {
-    if (merchant === null) router.replace("/login");
+    if (company === null) router.replace("/login");
     // Arriving already confirmed goes straight on; a code confirmed here shows the tick first.
-    else if (merchant?.emailVerified && !done) router.replace("/onboarding");
-  }, [merchant, router, done]);
+    else if (company?.emailVerified && !done) router.replace("/onboarding");
+  }, [company, router, done]);
 
   useEffect(() => {
     if (!done) return;
@@ -62,7 +62,7 @@ export default function VerifyEmailPage() {
     setError(null);
     setNotice(null);
     try {
-      const res = await api.post<{ merchant: Merchant }>("/auth/email/verify", { code: value });
+      const res = await api.post<{ company: Company }>("/auth/email/verify", { code: value });
       setDone(true);
       await mutate(res, { revalidate: false });
     } catch (err) {
@@ -102,7 +102,7 @@ export default function VerifyEmailPage() {
     }
   };
 
-  if (!merchant || (merchant.emailVerified && !done)) return <div style={{ minHeight: "100vh" }} aria-busy="true" />;
+  if (!company || (company.emailVerified && !done)) return <div style={{ minHeight: "100vh" }} aria-busy="true" />;
 
   if (done) {
     return (
@@ -135,7 +135,7 @@ export default function VerifyEmailPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <h1 className={styles.cardTitle}>Check your email</h1>
           <span className={styles.cardText}>
-            We sent a 6-digit code to <span style={{ fontWeight: 700, color: "var(--ink)", overflowWrap: "anywhere" }}>{merchant.email}</span>. Enter it to open your dashboard.
+            We sent a 6-digit code to <span style={{ fontWeight: 700, color: "var(--ink)", overflowWrap: "anywhere" }}>{company.email}</span>. Enter it to open your dashboard.
           </span>
         </div>
         {error ? (

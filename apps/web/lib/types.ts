@@ -1,21 +1,25 @@
-// The API's shapes, straight from the shared package, plus the few list/summary envelopes.
-import type { ChainPayment, PaymentRequest, RequestEvent } from "@paybridge/shared";
-
+// The API's shapes, straight from the shared package, plus list envelopes.
 export type {
   ApiKey,
-  ChainPayment,
+  Batch,
+  BatchStatus,
   ChallengeResponse,
-  CustomerSummary,
-  Daily,
-  Checkout,
-  CheckoutStatus,
-  Merchant,
-  PaymentOutcome,
-  PaymentRequest,
-  RequestEvent,
-  RequestStats,
-  RequestStatus,
+  Company,
+  Employee,
+  FailureCode,
+  FundingProblem,
+  Group,
+  ItemStatus,
+  ReceiveProblem,
+  RecipientCheck,
+  Run,
+  RunCheck,
+  RunEvent,
+  RunItem,
+  RunStatus,
+  RunSummary,
   Session,
+  SignableBatch,
   Summary,
   Trustline,
   Wallet,
@@ -26,20 +30,6 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
-export interface RequestDetail {
-  customer: import("@paybridge/shared").CustomerSummary | null;
-  request: PaymentRequest;
-  payments: ChainPayment[];
-  events: RequestEvent[];
-}
-
-export interface AssetRef {
-  code: string;
-  issuer: string | null;
-}
-
-export interface AssetAmount {
-  asset: AssetRef;
-  amount: string;
-  amountStroops: string;
+export interface EmployeePage extends Page<import("@paybridge/shared").Employee> {
+  total: number;
 }

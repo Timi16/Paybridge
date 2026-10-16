@@ -1,41 +1,25 @@
-import { displayStatus, PAYMENT_OUTCOME, REQUEST_STATUS, type IconName, type PillTone } from "@/lib/status";
-import type { PaymentOutcome, PaymentRequest, RequestStatus } from "@/lib/types";
-import { Icon } from "./Icon";
+import { BATCH_STATUS, ITEM_STATUS, RUN_STATUS, type StatusSpec, type Tone } from "@/lib/payroll";
+import type { BatchStatus, ItemStatus, RunStatus } from "@/lib/types";
+import { Icon, type AnyIcon } from "./Icon";
 
-export function Pill({ tone, icon, children }: { tone: PillTone; icon?: IconName; children: React.ReactNode }) {
+export function Pill({ tone, icon, children }: { tone: Tone; icon?: AnyIcon; children: React.ReactNode }) {
   return (
     <span className={`pill pill-${tone}`}>
-      {icon ? <Icon name={icon} size={12} strokeWidth={2.5} /> : null}
+      {icon ? <Icon name={icon} size={13} strokeWidth={2.4} /> : null}
       {children}
     </span>
   );
 }
 
-/** The PayBridge view of a request: status plus the derived "wrong asset" and "refunded" states. */
-export function RequestPill({ request }: { request: Pick<PaymentRequest, "status" | "refundDue" | "refundedAt" | "asset"> }) {
-  const spec = displayStatus(request);
+function SpecPill({ spec, label }: { spec: StatusSpec; label?: string }) {
+  // Keyed by label so the pill animates in when the status changes live.
   return (
-    // Keyed by state so the pill flips when the status changes live.
-    <Pill key={spec.key} tone={spec.tone} icon={spec.icon}>
-      {spec.label}
+    <Pill key={label ?? spec.label} tone={spec.tone} icon={spec.icon}>
+      {label ?? spec.label}
     </Pill>
   );
 }
 
-export function RequestStatusPill({ status }: { status: RequestStatus }) {
-  const spec = REQUEST_STATUS[status];
-  return (
-    <Pill tone={spec.tone} icon={spec.icon}>
-      {spec.label}
-    </Pill>
-  );
-}
-
-export function OutcomePill({ outcome }: { outcome: PaymentOutcome }) {
-  const spec = PAYMENT_OUTCOME[outcome];
-  return (
-    <Pill tone={spec.tone} icon={spec.icon}>
-      {spec.label}
-    </Pill>
-  );
-}
+export const RunStatusPill = ({ status, label }: { status: RunStatus; label?: string }) => <SpecPill spec={RUN_STATUS[status]} label={label} />;
+export const ItemStatusPill = ({ status }: { status: ItemStatus }) => <SpecPill spec={ITEM_STATUS[status]} />;
+export const BatchStatusPill = ({ status }: { status: BatchStatus }) => <SpecPill spec={BATCH_STATUS[status]} />;

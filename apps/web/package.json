@@ -7,8 +7,7 @@
     "build": "next build",
     "start": "next start --port 3000",
     "lint": "eslint app components lib",
-    "typecheck": "next typegen && tsc -p tsconfig.json",
-    "e2e": "node e2e/walkthrough.mjs && node e2e/freighter.mjs"
+    "typecheck": "next typegen && tsc -p tsconfig.json"
   },
   "dependencies": {
     "@paybridge/shared": "workspace:*",

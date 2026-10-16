@@ -15,6 +15,7 @@ export function CloseAccountCard({ businessName }: { businessName: string }) {
   const { mutate } = useSWRConfig();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,17 +28,18 @@ export function CloseAccountCard({ businessName }: { businessName: string }) {
 
   const ask = () => {
     setText("");
+    setPassword("");
     setError(null);
     setOpen(true);
   };
 
   const close = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ok || busy) return;
+    if (!ok || !password || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await api.post("/auth/close", { confirm: WORD });
+      await api.post("/auth/close", { password, confirm: WORD });
       // Drop every cached response: nothing of this account may stay in the browser.
       await mutate(() => true, undefined, { revalidate: false });
       router.replace("/");
@@ -48,7 +50,7 @@ export function CloseAccountCard({ businessName }: { businessName: string }) {
   };
 
   return (
-    <Section danger gap={12} title="Close this account" sub="Open requests expire. Your wallets and their funds are untouched, they were never ours.">
+    <Section danger gap={12} title="Close this account" sub="Drafts and payments not yet sent are cancelled. Paid runs keep their record. Your wallets and their funds are untouched; they were never ours.">
       <button type="button" className="btn btn-secondary" onClick={ask} style={{ padding: "0 18px", fontSize: 15, color: "var(--error)", alignSelf: "flex-start" }}>
         Close account…
       </button>
@@ -56,9 +58,21 @@ export function CloseAccountCard({ businessName }: { businessName: string }) {
       <Dialog open={open} onClose={() => setOpen(false)} title={`Close ${businessName} on PayBridge?`} width={480}>
         <form onSubmit={close} noValidate style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <span style={{ fontSize: 14, color: "var(--slate)", lineHeight: 1.5 }}>
-            Open requests expire immediately and you&apos;ll be signed out. Your wallets and their funds are untouched. Type <strong style={{ color: "var(--ink)" }}>CLOSE</strong> to
-            confirm.
+            Drafts and unsent payments are cancelled and you&apos;ll be signed out everywhere. A batch waiting for your signature must finish or expire first. Your wallets and
+            their funds are untouched. Enter your password and type <strong style={{ color: "var(--ink)" }}>CLOSE</strong> to confirm.
           </span>
+          <input
+            className="input"
+            type="password"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setError(null);
+            }}
+            placeholder="Your password"
+            aria-label="Your password"
+            autoComplete="current-password"
+          />
           <div className={styles.letters} aria-hidden="true">
             {WORD.split("").map((letter, i) => (
               <span key={letter} className={`mono ${styles.letter}${i < matched ? ` ${styles.letterOn}` : ""}`}>
@@ -90,7 +104,7 @@ export function CloseAccountCard({ businessName }: { businessName: string }) {
             <button type="button" className="btn btn-secondary" onClick={() => setOpen(false)} disabled={busy} aria-busy={busy} style={{ padding: "0 18px", fontSize: 15 }}>
               Keep account
             </button>
-            <button type="submit" className={`btn ${styles.closeBtn}${ok ? ` ${styles.closeBtnOn}` : ""}`} disabled={!ok || busy} aria-busy={busy} style={{ fontSize: 15 }}>
+            <button type="submit" className={`btn ${styles.closeBtn}${ok ? ` ${styles.closeBtnOn}` : ""}`} disabled={!ok || !password || busy} aria-busy={busy} style={{ fontSize: 15 }}>
               {busy ? "Closing…" : "Close account"}
             </button>
           </div>

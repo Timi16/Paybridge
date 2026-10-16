@@ -27,8 +27,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       <div aria-live="polite" role="status" style={{ position: "fixed", right: 24, bottom: 24, left: 24, display: "flex", justifyContent: "flex-end", pointerEvents: "none", zIndex: 60 }}>
         {message ? (
-          <div key={tick} className="toast" style={{ background: "var(--ink)", color: "#FFFFFF", padding: "12px 16px", borderRadius: 12, fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 10, maxWidth: "100%", boxShadow: "0 12px 30px rgba(2,6,23,0.3)" }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--brand-on-dark)" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+          <div key={tick} className="toast" style={{ background: "var(--sheet)", color: "var(--ink)", border: "1px solid var(--rule)", borderLeft: "3px solid var(--green)", padding: "12px 16px", borderRadius: "0 4px 4px 0", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 10, maxWidth: "100%", boxShadow: "var(--shadow-sheet)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
               <path d="M5 12l5 5L20 7" style={{ "--len": 24, strokeDasharray: 24, animation: "logo-draw 0.35s ease-out 0.15s both" } as React.CSSProperties} />
             </svg>
             {message}

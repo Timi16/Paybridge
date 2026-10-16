@@ -10,8 +10,8 @@ import { useToast } from "@/components/Toast";
 import { api, ApiError, errorMessage } from "@/lib/api";
 import { API_URL } from "@/lib/config";
 import { formatDate, timeAgo } from "@/lib/format";
-import { useNow, usePollWhenOffline } from "@/lib/live";
-import { useMe, useWallets } from "@/lib/session";
+import { useNow } from "@/lib/hooks";
+import { useWallets } from "@/lib/session";
 import type { ApiKey } from "@/lib/types";
 
 const KEYS_PATH = "/v1/api-keys";
@@ -26,52 +26,56 @@ const TABS: { id: Tab; label: string }[] = [
 
 /** Real, runnable samples for this API. Only the key and (with no wallet added yet) the wallet id are placeholders. */
 function codeSamples(walletId: string): Record<Tab, string> {
-  const endpoint = `${API_URL}/v1/payment-requests`;
+  const base = `${API_URL}/v1/payroll-runs`;
   return {
     curl: [
-      `curl -X POST ${endpoint} \\`,
+      `# 1. A draft run for everyone in a group (or pass employeeIds)`,
+      `curl -X POST ${base} \\`,
       `  -H "Authorization: Bearer pb_test_…" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -H "Idempotency-Key: order-1042" \\`,
-      `  -d '{"walletId":"${walletId}","amount":"50","asset":"USDC","description":"Order #1042"}'`,
+      `  -d '{"name":"October payroll","walletId":"${walletId}","groupIds":["<group id>"]}'`,
+      ``,
+      `# 2. Start it: everyone is checked on Stellar and the funding wallet must cover the total`,
+      `curl -X POST ${base}/<run id>/start -H "Authorization: Bearer pb_test_…"`,
+      ``,
+      `# 3. Get the batch to sign (up to 100 payments in one transaction)`,
+      `curl -X POST ${base}/<run id>/batches/next -H "Authorization: Bearer pb_test_…"`,
     ].join("\n"),
     node: [
-      `const res = await fetch("${endpoint}", {`,
+      `import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";`,
+      ``,
+      `const api = (path, body) => fetch("${base}" + path, {`,
       `  method: "POST",`,
-      `  headers: {`,
-      "    Authorization: `Bearer ${process.env.PAYBRIDGE_KEY}`, // pb_test_…",
-      `    "Content-Type": "application/json",`,
-      `    "Idempotency-Key": "order-1042"`,
-      `  },`,
-      `  body: JSON.stringify({`,
-      `    walletId: "${walletId}",`,
-      `    amount: "50",`,
-      `    asset: "USDC",`,
-      `    description: "Order #1042"`,
-      `  })`,
-      `});`,
-      `if (!res.ok) throw new Error((await res.json()).error.message);`,
-      `const { request, checkoutUrl } = await res.json();`,
-      `// Send your customer to checkoutUrl. request.status starts as "PENDING".`,
+      "  headers: { Authorization: `Bearer ${process.env.PAYBRIDGE_KEY}`, \"Content-Type\": \"application/json\" },",
+      `  body: JSON.stringify(body ?? {}),`,
+      `}).then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error.message); return j; });`,
+      ``,
+      `const { run } = await api("", { name: "October payroll", walletId: "${walletId}", groupIds: ["<group id>"] });`,
+      "await api(`/${run.id}/start`);",
+      `// Sign each batch with the funding wallet's key, kept on YOUR side. PayBridge never sees it.`,
+      `const signer = Keypair.fromSecret(process.env.FUNDING_SECRET);`,
+      `for (;;) {`,
+      "  const { batch } = await api(`/${run.id}/batches/next`);",
+      `  if (!batch) break;`,
+      `  const tx = TransactionBuilder.fromXDR(batch.xdr, batch.networkPassphrase);`,
+      `  tx.sign(signer);`,
+      "  await api(`/${run.id}/batches/${batch.id}/submit`, { signedXdr: tx.toXDR() });",
+      `}`,
     ].join("\n"),
     resp: [
-      `// 201 Created. Sending the same Idempotency-Key again returns the original with 200.`,
-      `// Shape only: the values below are placeholders, and "request" has more fields.`,
+      `// GET ${base}/<run id> once it has finished. Shape only; values are placeholders.`,
       `{`,
-      `  "request": {`,
-      `    "id": "<request id>",`,
-      `    "publicId": "<public id>",`,
-      `    "status": "PENDING",`,
-      `    "walletId": "${walletId}",`,
-      `    "asset": { "code": "USDC", "issuer": "<issuer address>" },`,
-      `    "amount": "50.0000000",`,
-      `    "amountReceived": "0.0000000",`,
-      `    "memo": "<memo the customer pays with>",`,
-      `    "description": "Order #1042",`,
-      `    "expiresAt": "<ISO time, 30 minutes from now by default>",`,
-      `    "createdVia": "api"`,
-      `  },`,
-      `  "checkoutUrl": "<link to the checkout page for this request>"`,
+      `  "run": {`,
+      `    "number": 7, "name": "October payroll", "status": "PARTIAL",`,
+      `    "total": "19850.0000000", "paid": "18100.0000000", "failedTotal": "1750.0000000",`,
+      `    "counts": { "lines": 8, "paid": 7, "failed": 1, "pending": 0, "sending": 0, "cancelled": 0 },`,
+      `    "items": [`,
+      `      { "name": "Ada Okafor", "amount": "3200.0000000", "status": "PAID",`,
+      `        "txHash": "<64 hex chars>", "ledger": 1234567, "paidAt": "<ISO time>" },`,
+      `      { "name": "Tomás Reyes", "amount": "1750.0000000", "status": "FAILED",`,
+      `        "failureCode": "NO_TRUSTLINE", "txHash": null }`,
+      `    ]`,
+      `  }`,
       `}`,
     ].join("\n"),
   };
@@ -92,7 +96,7 @@ export default function ApiKeysPage() {
   const toast = useToast();
   const { mutate } = useSWRConfig();
   const now = useNow();
-  const { data, error, isLoading, mutate: reload } = useSWR<{ data: ApiKey[] }>(KEYS_PATH, { refreshInterval: usePollWhenOffline() });
+  const { data, error, isLoading, mutate: reload } = useSWR<{ data: ApiKey[] }>(KEYS_PATH);
   const { data: wallets } = useWallets();
   const keys = data?.data;
 
@@ -117,9 +121,8 @@ export default function ApiKeysPage() {
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 
-  // Any receiving wallet works for a request; the default one is the natural example.
-  const { merchant } = useMe();
-  const sampleWallet = wallets?.data.find((w) => w.id === merchant?.defaultWalletId) ?? wallets?.data[0];
+  // The first funding wallet is the natural example.
+  const sampleWallet = wallets?.data[0];
   const samples = codeSamples(sampleWallet?.id ?? WALLET_PLACEHOLDER);
 
   const trimmed = name.trim();
@@ -222,7 +225,7 @@ export default function ApiKeysPage() {
           </Link>
           <h1 className="h1">API keys</h1>
           <span className="sub">
-            Create PayBridge payment requests from your own website or app. Keys start with <code className="mono">pb_test_</code> and only work on Testnet.
+            Run payroll from your own systems: add people, create runs, submit signed batches. Keys start with <code className="mono">pb_test_</code> and only work on Testnet.
           </span>
         </div>
         <button type="button" className="btn btn-primary" onClick={openCreate} style={{ fontSize: 15 }}>
@@ -243,7 +246,7 @@ export default function ApiKeysPage() {
         ) : !isLoading && keys && keys.length === 0 ? (
           <div className="empty">
             <strong>No API keys yet</strong>
-            <span>Create a key to make payment requests from your own website or app.</span>
+            <span>Create a key to run payroll from your own systems.</span>
             <button type="button" className="btn btn-primary btn-sm" onClick={openCreate} style={{ marginTop: 8 }}>
               Create key
             </button>
@@ -363,12 +366,12 @@ export default function ApiKeysPage() {
           {samples[tab]}
         </pre>
         <p style={{ padding: "12px 20px 16px", borderTop: "1px solid #1E293B", fontSize: 13, color: "#94A3B8", lineHeight: 1.6 }}>
-          The response has a <code className="mono" style={{ color: "#E2E8F0" }}>checkoutUrl</code>: send your customer there to pay. Use a new{" "}
-          <code className="mono" style={{ color: "#E2E8F0" }}>Idempotency-Key</code> for each order, so a retry never creates a second request.
+          Each batch is an unsigned Stellar transaction. Sign it with the funding wallet wherever its key lives (it never comes to PayBridge) and submit it back; while a
+          batch is open, <code className="mono" style={{ color: "#E2E8F0" }}>batches/next</code> returns that same batch, so nobody is ever paid twice.
           {sampleWallet ? null : (
             <>
               {" "}
-              Replace <code className="mono" style={{ color: "#E2E8F0" }}>{WALLET_PLACEHOLDER}</code> with the ID of a receiving wallet; add one in{" "}
+              Replace <code className="mono" style={{ color: "#E2E8F0" }}>{WALLET_PLACEHOLDER}</code> with the ID of a funding wallet; add one in{" "}
               <Link href="/settings" style={{ color: "var(--teal-on-dark)", fontWeight: 700 }}>
                 Settings
               </Link>
@@ -484,7 +487,7 @@ export default function ApiKeysPage() {
           </>
         }
       >
-        <span style={{ fontSize: 15, color: "var(--slate)" }}>Anything using this key stops working right away. Requests it already created keep working. This can&apos;t be undone.</span>
+        <span style={{ fontSize: 15, color: "var(--slate)" }}>Anything using this key stops working right away. Runs it already created stay as they are. This can&apos;t be undone.</span>
         {revokeError ? (
           <div role="alert" className="alert">
             {revokeError}

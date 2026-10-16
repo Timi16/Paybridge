@@ -32,16 +32,16 @@ export function Dialog({ open, onClose, title, children, footer, width = 460 }: 
       onClick={(e) => {
         if (e.target === ref.current) onClose(); // click on the backdrop
       }}
-      style={{ width: "calc(100% - 32px)", maxWidth: width, border: "none", borderRadius: 18, padding: 0, color: "var(--ink)", background: "var(--surface)", boxShadow: "0 30px 60px rgba(2,6,23,0.35)" }}
+      style={{ width: "calc(100% - 32px)", maxWidth: width }}
     >
       {open ? (
-        <div style={{ position: "relative", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ position: "relative", padding: "26px 28px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
           <button type="button" className="dialog-x" aria-label="Close" onClick={onClose}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
               <path d="M6 6l12 12M18 6L6 18" />
             </svg>
           </button>
-          <h2 id={titleId} style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.01em", paddingRight: 36 }}>
+          <h2 id={titleId} className="h2" style={{ fontSize: 26, paddingRight: 36 }}>
             {title}
           </h2>
           {children}

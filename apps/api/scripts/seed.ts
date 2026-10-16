@@ -40,6 +40,7 @@ async function main(): Promise<void> {
   const existing = await prisma.company.findUnique({ where: { email: EMAIL } });
   if (existing) {
     await prisma.payrollRun.deleteMany({ where: { companyId: existing.id } });
+    await prisma.wallet.deleteMany({ where: { companyId: existing.id } });
     await prisma.company.delete({ where: { id: existing.id } });
   }
   const company = await prisma.company.create({
@@ -107,11 +108,13 @@ async function main(): Promise<void> {
       },
     });
     const hash = fakeHash();
+    // Only paid lines were in the transaction: a line that can't receive is left out before signing.
+    const paidPeople = picked.filter((_, i) => lineStatus(i) === "PAID");
     const batch =
       status === "DRAFT"
         ? null
         : await prisma.payrollBatch.create({
-            data: { runId: r.id, companyId: company.id, number: 1, txHash: hash, envelopeXdr: "seed", sequence: "1", maxTime: when, opCount: picked.length, totalStroops: picked.reduce((s, p) => s + p.defaultAmountStroops, 0n), status: "CONFIRMED", ledger: 1_200_000 + number, closedAt: when, settledAt: when },
+            data: { runId: r.id, companyId: company.id, number: 1, txHash: hash, envelopeXdr: "seed", sequence: "1", maxTime: when, opCount: paidPeople.length, totalStroops: paidPeople.reduce((s, p) => s + p.defaultAmountStroops, 0n), status: "CONFIRMED", ledger: 1_200_000 + number, closedAt: when, submittedAt: when, settledAt: when },
           });
     await prisma.payrollItem.createMany({
       data: picked.map((p, i) => {
@@ -128,6 +131,7 @@ async function main(): Promise<void> {
           failureCode: st === "FAILED" ? "NO_TRUSTLINE" : null,
           failureDetail: st === "FAILED" ? "op_no_trust" : null,
           batchId: st === "PAID" ? (batch?.id ?? null) : null,
+          opIndex: st === "PAID" ? paidPeople.indexOf(p) : null,
           txHash: st === "PAID" ? hash : null,
           ledger: st === "PAID" ? (batch?.ledger ?? null) : null,
           paidAt: st === "PAID" ? when : null,
