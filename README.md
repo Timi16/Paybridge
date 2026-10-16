@@ -98,7 +98,10 @@ pm2 start ecosystem.config.cjs && pm2 save && pm2 startup
 Later deploys: `./deploy/deploy.sh <git sha>` pulls, migrates, builds, runs `pm2 reload`, polls
 `/health` for 60 s and rolls back to the previous commit if it stays unhealthy.
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs audit, lint, typecheck, tests and both builds,
-then calls that script over SSH.
+then calls that script over SSH: set the `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_USER` secrets (and the
+`DEPLOY_PATH` variable if the repo isn't at `~/Paybridge`); without them the deploy step is skipped.
+After changing a dependency in a `package.json`, run `pnpm install` and commit `pnpm-lock.yaml` too: CI
+and Vercel install with a frozen lockfile.
 
 - Run exactly **one** `paybridge-worker`.
 - Put Caddy in front ([deploy/Caddyfile.snippet](deploy/Caddyfile.snippet)) for HTTPS; the API listens on

@@ -48,9 +48,15 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          # Where the repo lives on the server; set the DEPLOY_PATH repository variable to change it.
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '~/Paybridge' }}
           SHA: ${{ github.sha }}
         run: |
+          if [ -z "$SSH_KEY" ] || [ -z "$HOST" ] || [ -z "$USER" ]; then
+            echo "::notice::Deploy skipped: set the DEPLOY_SSH_KEY, DEPLOY_HOST and DEPLOY_USER secrets to deploy from CI."
+            exit 0
+          fi
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy "$USER@$HOST" "cd ~/paybridge && ./deploy/deploy.sh $SHA"
+          ssh -i ~/.ssh/deploy "$USER@$HOST" "cd $DEPLOY_PATH && ./deploy/deploy.sh $SHA"

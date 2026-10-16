@@ -9,6 +9,15 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:4200/health}"
 cd "$(dirname "$0")/.."
 PREVIOUS="$(git rev-parse HEAD)"
 
+# Edits to tracked files on the server would block the checkout (or be silently deployed).
+# .env is untracked, so it is never in the way.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "The server has local changes to tracked files:" >&2
+  git status --short --untracked-files=no >&2
+  echo "Undo them (e.g. git checkout -- pnpm-lock.yaml) and run the deploy again." >&2
+  exit 1
+fi
+
 release() {
   git fetch --quiet origin
   git checkout --quiet --detach "$1"

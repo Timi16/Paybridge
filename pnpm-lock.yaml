@@ -203,10 +203,10 @@ importers:
         specifier: ^5.0.0
         version: 5.2.1
       express-rate-limit:
-        specifier: '*'
+        specifier: 8.7.0
         version: 8.7.0(express@5.2.1)
       helmet:
-        specifier: '*'
+        specifier: 8.3.0
         version: 8.3.0
       nodemailer:
         specifier: ^10.0.14
