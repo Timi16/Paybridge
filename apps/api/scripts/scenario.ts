@@ -52,6 +52,9 @@ async function main(): Promise<void> {
   const { buildApp } = await import("../src/app");
   const { prisma } = await import("../src/db/prisma");
   const { HorizonGateway } = await import("../src/stellar/horizonGateway");
+  const { createPayrollService } = await import("../src/modules/payroll/service");
+  const { confirmOpenBatches } = await import("../src/engine/confirmer");
+  const { DEFAULT_LIMITS } = await import("../src/deps");
   const pino = (await import("pino")).default;
 
   const funder = Keypair.random();
@@ -63,7 +66,11 @@ async function main(): Promise<void> {
   await send(issuer, [Operation.payment({ destination: funder.publicKey(), asset: USDC, amount: "50000" })]);
   log("Minted 50,000 test USDC to the funding wallet");
 
-  const { app } = buildApp({ prisma, stellar: new HorizonGateway(HORIZON), logger: pino({ level: "silent" }), mailer: null, verifyEmail: false });
+  const stellar = new HorizonGateway(HORIZON);
+  const silent = pino({ level: "silent" });
+  const { app } = buildApp({ prisma, stellar, logger: silent, mailer: null, verifyEmail: false });
+  // The worker's confirmer, for a batch Horizon hasn't finished recording when the submit returns.
+  const payroll = createPayrollService({ prisma, stellar, logger: silent, limits: DEFAULT_LIMITS, mailer: null, verifyEmail: false, batchWindowSeconds: 300 });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -113,8 +120,17 @@ async function main(): Promise<void> {
         const tx = TransactionBuilder.fromXDR(batch.xdr, Networks.TESTNET);
         tx.sign(funder); // what Freighter does in the browser
         const res = await call<{ batch: { status: string; txHash: string; ledger: number | null } }>("POST", `/v1/payroll-runs/${run.id}/batches/${batch.id}/submit`, { signedXdr: tx.toXDR() });
-        log(`Batch ${batch.number} submitted`, `${batch.opCount} payments, ${batch.total} USDC → ${res.batch.status} (ledger ${res.batch.ledger ?? "pending"})`);
-        assert(res.batch.status === "CONFIRMED", `batch ${batch.number} confirmed (got ${res.batch.status})`);
+        let status = res.batch.status;
+        let ledger = res.batch.ledger;
+        for (let wait = 0; status === "SUBMITTED" && wait < 30; wait++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          await confirmOpenBatches({ prisma, payroll, logger: silent }, Date.now() + 60_000);
+          const after = await prisma.payrollBatch.findUniqueOrThrow({ where: { id: batch.id } });
+          status = after.status;
+          ledger = after.ledger;
+        }
+        log(`Batch ${batch.number} submitted`, `${batch.opCount} payments, ${batch.total} USDC → ${status} (ledger ${ledger ?? "pending"})`);
+        assert(status === "CONFIRMED", `batch ${batch.number} confirmed (got ${status})`);
         // Double submission of the same signed envelope must not send anything twice.
         const again = await call<{ batch: { status: string } }>("POST", `/v1/payroll-runs/${run.id}/batches/${batch.id}/submit`, { signedXdr: tx.toXDR() });
         assert(again.batch.status === "CONFIRMED", "re-submitting the same batch is a no-op");

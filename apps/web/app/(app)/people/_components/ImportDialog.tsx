@@ -98,10 +98,18 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
   const [error, setError] = useState<string | null>(null);
   const [serverProblems, setServerProblems] = useState<string[]>([]);
   const { rows, problems } = useMemo(() => parse(text), [text]);
+  const [secretRemoved, setSecretRemoved] = useState(false);
+  /** A secret key (S…) never stays on screen: its line is dropped from the box as soon as it appears. */
+  const setSafeText = (value: string) => {
+    const lines = value.split(/\r?\n/);
+    const kept = lines.filter((l) => !/S[A-Z2-7]{55}/.test(l.toUpperCase()));
+    setSecretRemoved(kept.length !== lines.length);
+    setText(kept.join("\n"));
+  };
 
   const load = async (file: File | undefined) => {
     if (!file) return;
-    setText(await file.text());
+    setSafeText(await file.text());
   };
 
   const submit = async () => {
@@ -131,7 +139,13 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
         Paste from a spreadsheet, or choose a CSV file. The first row names the columns: <span className="mono">name, wallet, amount</span>, and optionally{" "}
         <span className="mono">group, email</span>. Missing groups are created. It&apos;s all or nothing: one bad row and nobody is added.
       </p>
-      <textarea className="textarea mono" rows={7} value={text} onChange={(e) => setText(e.target.value)} placeholder={SAMPLE} aria-label="People as CSV" style={{ fontSize: 12 }} />
+      <textarea className="textarea mono" rows={7} value={text} onChange={(e) => setSafeText(e.target.value)} placeholder={SAMPLE} aria-label="People as CSV" style={{ fontSize: 12 }} />
+      {secretRemoved ? (
+        <div role="alert" className="alert">
+          <b>A secret key (S…) was removed.</b> Never share one, with PayBridge or anyone; ask for the public address (G…). Whoever&apos;s key it is should move their
+          funds to a new wallet.
+        </div>
+      ) : null}
       <label className="btn btn-secondary btn-sm" style={{ alignSelf: "flex-start" }}>
         Choose a CSV file
         <input type="file" accept=".csv,text/csv,text/plain" className="sr-only" onChange={(e) => void load(e.target.files?.[0])} />

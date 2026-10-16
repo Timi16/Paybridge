@@ -91,6 +91,7 @@
 .trust li:nth-child(1) { animation-delay: 0.7s; } .trust li:nth-child(2) { animation-delay: 0.8s; }
 .trust li:nth-child(3) { animation-delay: 0.9s; } .trust li:nth-child(4) { animation-delay: 1s; }
 .demoTotal .money { transition: color 0.4s; }
-.demoSeal { position: absolute; right: 22px; top: 70px; }
+.demoSeal { position: absolute; right: 22px; top: 70px; z-index: 1; }
+@media (max-width: 520px) { .demoSeal { display: none; } }
 .demoRows li:global(.just-paid) { animation: row-paid 1.8s ease-out both; }
 .demoRows li:global(.just-failed) { animation: row-failed 1.8s ease-out both; }

@@ -186,6 +186,8 @@ export default function OverviewPage() {
   // The wallet the next run pays from (or the first one), compared with what that run still has to send.
   const wallet = wallets?.data.find((w) => w.id === next?.wallet.id) ?? wallets?.data[0];
   const remaining = next ? (parseAmount(next.total) ?? 0n) - (parseAmount(next.paid) ?? 0n) : 0n;
+  // Where the failed payments are: the most recent run that has any (or the payroll list).
+  const failedRun = data ? [...data.activeRuns, ...data.recentRuns].find((r) => r.counts.failed > 0) : undefined;
   const nothingYet = data && wallets && data.activeEmployees === 0 && data.recentRuns.length === 0 && data.draftRuns.length === 0;
   const walletShort = wallet && next && wallet.id === next.wallet.id && wallet.usdcBalance !== null ? (parseAmount(wallet.usdcBalance) ?? 0n) < remaining : false;
 
@@ -236,14 +238,14 @@ export default function OverviewPage() {
 
       <section className="sheet" aria-label="This month">
         <div className="stagger" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
-          <div className="sheet-pad" style={{ borderRight: "1px solid var(--rule-soft)", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="sheet-pad kpi-cell" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <span className="eyebrow">Paid this month</span>
             {data ? <Money amount={data.paidThisMonth} /> : <span className="skeleton" style={{ height: 40, width: 200 }} />}
             <span className="muted" style={{ fontSize: 13 }}>
               {data ? `${data.peoplePaidThisMonth} ${data.peoplePaidThisMonth === 1 ? "person" : "people"} paid on Stellar Testnet` : " "}
             </span>
           </div>
-          <div className="sheet-pad" style={{ borderRight: "1px solid var(--rule-soft)", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="sheet-pad kpi-cell" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <span className="eyebrow">Funding wallet</span>
             {wallet ? (
               <>
@@ -264,7 +266,7 @@ export default function OverviewPage() {
               <span className="skeleton" style={{ height: 40, width: 200 }} />
             )}
           </div>
-          <div className="sheet-pad" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="sheet-pad kpi-cell" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <span className="eyebrow">Needs a look</span>
             {data ? (
               <span className="money" style={{ fontSize: 40, color: data.failedLines + data.employeesWithProblems > 0 ? "var(--failed)" : undefined }}>
@@ -274,7 +276,11 @@ export default function OverviewPage() {
               <span className="skeleton" style={{ height: 40, width: 60 }} />
             )}
             <span className="muted" style={{ fontSize: 13, display: "flex", flexDirection: "column", gap: 2 }}>
-              {data && data.failedLines > 0 ? <Link href="/payroll?status=PARTIAL">{data.failedLines} payment{data.failedLines === 1 ? "" : "s"} not sent</Link> : null}
+              {data && data.failedLines > 0 ? (
+                <Link href={failedRun ? `/payroll/${failedRun.id}` : "/payroll"}>
+                  {data.failedLines} payment{data.failedLines === 1 ? "" : "s"} not sent
+                </Link>
+              ) : null}
               {data && data.employeesWithProblems > 0 ? (
                 <Link href="/people?ready=problem">
                   {data.employeesWithProblems} {data.employeesWithProblems === 1 ? "person" : "people"} can&apos;t receive USDC

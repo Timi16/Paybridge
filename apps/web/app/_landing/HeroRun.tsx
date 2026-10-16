@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "./landing.module.css";
 
 // A demonstration, not data: names and hashes are illustrative and labelled as such on the page.
@@ -16,20 +16,37 @@ const HASH = "9f3c…e21a";
 /** 0 draft → 1 checked (one excluded) → 2 signing → 3 sending → 4 paid; then it starts over. */
 const STAGES = [2200, 1800, 1600, 1600, 3400];
 
+/** The story plays twice, then rests on "paid"; it pauses while off screen. Replay restarts it. */
+const CYCLES = 2;
+
 export function HeroRun() {
   const [stage, setStage] = useState(4);
+  const [plays, setPlays] = useState(0);
+  const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; // rests on "paid"
+    let visible = true;
+    const observer = "IntersectionObserver" in window ? new IntersectionObserver(([e]) => (visible = Boolean(e?.isIntersecting))) : null;
+    if (ref.current && observer) observer.observe(ref.current);
     let s = 0;
+    let cycles = 0;
     setStage(0);
     let timer = setTimeout(function tick() {
+      if (!visible) {
+        timer = setTimeout(tick, 500);
+        return;
+      }
       s = (s + 1) % STAGES.length;
       setStage(s);
+      if (s === STAGES.length - 1 && ++cycles >= CYCLES) return; // rest on "paid"
       timer = setTimeout(tick, STAGES[s]);
     }, STAGES[0]);
-    return () => clearTimeout(timer);
-  }, []);
+    return () => {
+      clearTimeout(timer);
+      observer?.disconnect();
+    };
+  }, [plays]);
 
   const status = (p: (typeof PEOPLE)[number]) => {
     if (stage >= 1 && p.noTrust) return "failed";
@@ -40,7 +57,7 @@ export function HeroRun() {
   const caption = ["Draft · 5 people", "Checked on Stellar · 1 can't receive", "Waiting for your signature in Freighter", "Sending · 1 transaction", "4 paid · 1 not sent · 1 signature"][stage];
 
   return (
-    <div className={`sheet stub ${styles.demo}`} aria-label="Example payroll run (illustration)" role="img">
+    <div ref={ref} className={`sheet stub ${styles.demo}`} aria-label="Example payroll run (illustration)" role="img">
       {stage === 4 ? (
         <span className={`seal seal-partial ${styles.demoSeal}`} aria-hidden="true">
           Partly paid
@@ -64,8 +81,13 @@ export function HeroRun() {
             <i key={p.name} className={status(p) === "pending" ? "" : status(p)} />
           ))}
         </div>
-        <span className="muted" style={{ fontSize: 12 }}>
+        <span className="muted" style={{ fontSize: 12, display: "flex", justifyContent: "space-between", gap: 8 }}>
           {caption}
+          {stage === 4 ? (
+            <button type="button" className="btn-link" style={{ fontSize: 12 }} onClick={() => setPlays((n) => n + 1)} aria-label="Replay the example run">
+              Replay
+            </button>
+          ) : null}
         </span>
       </div>
       {stage === 2 ? (

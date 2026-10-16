@@ -103,6 +103,7 @@ export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) =
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   // Lines whose status just changed to Paid or Not sent glow once, so a live update is noticed.
   const previous = useRef<Map<string, ItemStatus> | null>(null);
+  const glowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [fresh, setFresh] = useState<Map<string, "just-paid" | "just-failed">>(new Map());
   useEffect(() => {
     const before = previous.current;
@@ -115,14 +116,20 @@ export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) =
     }
     if (changed.size === 0) return;
     setFresh(changed);
-    const t = setTimeout(() => setFresh(new Map()), 2400);
-    return () => clearTimeout(t);
+    // Not cancelled by the next poll: the glow always ends, once.
+    if (glowTimer.current) clearTimeout(glowTimer.current);
+    glowTimer.current = setTimeout(() => setFresh(new Map()), 2400);
   }, [run.items]);
+  useEffect(() => () => {
+    if (glowTimer.current) clearTimeout(glowTimer.current);
+  }, []);
   // Lines in a batch nobody has signed yet are not "sending": they wait for the company's signature.
   const unsigned = new Set(run.batches.filter((b) => b.status === "AWAITING_SIGNATURE").map((b) => b.number));
   const draft = run.status === "DRAFT";
   const count = (f: Filter) => (f === "all" ? run.items.length : run.items.filter((i) => i.status === f).length);
-  const shown = filter === "all" ? run.items : run.items.filter((i) => i.status === filter);
+  // A filter whose lines have all moved on (e.g. "Sending" after they settle) falls back to All.
+  const active: Filter = filter !== "all" && count(filter) === 0 ? "all" : filter;
+  const shown = active === "all" ? run.items : run.items.filter((i) => i.status === active);
 
   const remove = async (item: RunItem) => {
     if (removing.has(item.id)) return;
@@ -148,7 +155,7 @@ export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) =
         <div style={{ padding: "0 28px 14px" }}>
           <div className="seg" role="group" aria-label="Filter payments by status">
             {FILTERS.filter((f) => f.id === "all" || count(f.id) > 0).map((f) => (
-              <button key={f.id} type="button" aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
+              <button key={f.id} type="button" aria-pressed={active === f.id} onClick={() => setFilter(f.id)}>
                 {f.label}
                 <span className="count">{count(f.id)}</span>
               </button>

@@ -12,7 +12,6 @@ import { BatchStatusPill, RunStatusPill } from "@/components/StatusPill";
 import { useToast } from "@/components/Toast";
 import { api, errorMessage } from "@/lib/api";
 import { explorerAccount, explorerTx } from "@/lib/config";
-import { CountUpAmount } from "@/components/motion/CountUp";
 import { Seal } from "@/components/payroll/Seal";
 import { countdown, formatAmount, formatDateTime, formatDay, shortAddress, shortHash, sumAmounts } from "@/lib/format";
 import { useNow } from "@/lib/hooks";
@@ -26,8 +25,10 @@ import { ReviewDialog } from "./_components/ReviewDialog";
 /** Every line, ready for a spreadsheet. Amounts stay exact decimal strings. */
 function toCsv(run: Run): string {
   const esc = (v: string | number | null) => {
-    const s = v === null ? "" : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    let s = v === null ? "" : String(v);
+    // A cell starting with = + - @ (or a tab/CR) would run as a formula in a spreadsheet.
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const head = ["#", "name", "wallet", "amount_usdc", "status", "reason", "tx_hash", "ledger", "paid_at"];
   const rows = run.items.map((i) => [i.position, i.name, i.walletAddress, i.amount, i.status, i.failureCode, i.txHash, i.ledger, i.paidAt].map(esc).join(","));
@@ -191,7 +192,8 @@ function Totals({ run }: { run: Run }) {
         )}
       </div>
       <div className="money total-rule" style={{ fontSize: "clamp(36px, 6vw, 56px)", textAlign: "right" }} aria-label={`Total ${formatAmount(run.total)} USDC`}>
-        <CountUpAmount value={run.total} />
+        {/* The binding total never animates: what you see is always the exact amount. */}
+        {formatAmount(run.total)}
         <span className="unit">USDC</span>
       </div>
     </div>
@@ -259,7 +261,6 @@ function RunView({ run }: { run: Run }) {
       </nav>
 
       <article className="sheet stub" aria-labelledby="run-title">
-        <Seal key={run.status} status={run.status} date={run.finishedAt} />
         <div className="run-head">
           <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
             <span className="eyebrow">Payroll · Run #{String(run.number).padStart(4, "0")}</span>
@@ -291,6 +292,7 @@ function RunView({ run }: { run: Run }) {
           </div>
           <div className="run-head-status">
             <RunStatusPill status={run.status} />
+            <Seal key={run.status} status={run.status} date={run.finishedAt} />
           </div>
         </div>
         {run.status !== "DRAFT" ? (

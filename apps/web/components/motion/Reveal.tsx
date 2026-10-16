@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 
 interface Props {
   children: React.ReactNode;
@@ -49,10 +49,5 @@ export function Reveal({ children, delay = 0, from = "below", className, style, 
       : state === "shown"
         ? { opacity: 1, transform: "none", transition: `opacity 0.7s cubic-bezier(0.2,0.8,0.2,1) ${delay}ms, transform 0.7s cubic-bezier(0.2,0.8,0.2,1) ${delay}ms` }
         : {};
-  return (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- polymorphic tag
-    <Tag ref={ref as any} className={className} style={{ ...style, ...motion }}>
-      {children}
-    </Tag>
-  );
+  return createElement(Tag, { ref, className, style: { ...style, ...motion } }, children);
 }
