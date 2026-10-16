@@ -181,9 +181,11 @@ export default function OverviewPage() {
   }
 
   const next = data ? (data.activeRuns[0] ?? data.draftRuns[0] ?? null) : null;
-  const wallet = wallets?.data[0];
+  // The wallet the next run pays from (or the first one), compared with what that run still has to send.
+  const wallet = wallets?.data.find((w) => w.id === next?.wallet.id) ?? wallets?.data[0];
+  const remaining = next ? (parseAmount(next.total) ?? 0n) - (parseAmount(next.paid) ?? 0n) : 0n;
   const nothingYet = data && wallets && data.activeEmployees === 0 && data.recentRuns.length === 0 && data.draftRuns.length === 0;
-  const walletShort = wallet && next && wallet.usdcBalance !== null ? (parseAmount(wallet.usdcBalance) ?? 0n) < (parseAmount(next.total) ?? 0n) : false;
+  const walletShort = wallet && next && wallet.id === next.wallet.id && wallet.usdcBalance !== null ? (parseAmount(wallet.usdcBalance) ?? 0n) < remaining : false;
 
   const headline = !data ? (
     <span className="skeleton" style={{ display: "inline-block", width: "min(520px, 90%)" }}>
@@ -239,13 +241,13 @@ export default function OverviewPage() {
             <span className="eyebrow">Funding wallet</span>
             {wallet ? (
               <>
-                <Money amount={wallet.usdcBalance ?? "0"} />
+                {wallet.usdcBalance !== null ? <Money amount={wallet.usdcBalance} /> : <span className="money" style={{ fontSize: 40 }}>—</span>}
                 <span className="muted" style={{ fontSize: 13 }}>
                   <span className="mono" style={{ fontSize: 12 }}>
                     {walletName(wallet) === wallet.label ? `${wallet.label} · ` : ""}
                     {shortAddress(wallet.address)}
                   </span>
-                  {walletShort ? <span style={{ color: "var(--failed)" }}> · short of the next run</span> : next ? " · enough for the next run" : ""}
+                  {wallet.usdcBalance === null ? " · no USDC trustline yet" : walletShort ? <span style={{ color: "var(--failed)" }}> · short of the next run</span> : next && wallet.id === next.wallet.id ? " · enough for the next run" : ""}
                 </span>
               </>
             ) : wallets ? (

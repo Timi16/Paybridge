@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { CopyButton } from "@/components/CopyButton";
 import { Dialog } from "@/components/Dialog";
@@ -49,19 +49,24 @@ const PHASE_TEXT: Partial<Record<PayPhase["kind"], string>> = {
 };
 
 /** What's happening with the money right now, and the one thing to do next. */
-function PayPanel({ run, phase, onPay, onReview }: { run: Run; phase: PayPhase; onPay: () => void; onReview: () => void }) {
+function PayPanel({ run, phase, saving, onPay, onReview }: { run: Run; phase: PayPhase; saving: boolean; onPay: () => void; onReview: () => void }) {
   const now = useNow(1000);
   const open = run.batches.find((b) => b.status === "AWAITING_SIGNATURE" || b.status === "SUBMITTED");
+  // An unsigned batch past its window: Stellar has to confirm it can't land before a new one is built.
+  const lapsed = open?.status === "AWAITING_SIGNATURE" && new Date(open.maxTime).getTime() <= now ? open : null;
   const working = PHASE_TEXT[phase.kind];
 
   let body: React.ReactNode = null;
   if (phase.kind === "signing") {
     body = (
-      <div className="info-note" role="status" style={{ display: "flex", gap: 10, alignItems: "center" }}>
+      <div className="info-note" style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <span className="spinner" aria-hidden="true" />
         <span>
-          <b>Approve batch {phase.batch.number} in Freighter:</b> {phase.batch.opCount} payments, {formatAmount(phase.batch.total)} USDC. It expires in{" "}
-          <span className="mono">{countdown(phase.batch.maxTime, now)}</span>.
+          <span role="status">
+            <b>Approve batch {phase.batch.number} in Freighter:</b> {phase.batch.opCount} payments, {formatAmount(phase.batch.total)} USDC.
+          </span>{" "}
+          It expires in <span className="mono" aria-hidden="true">{countdown(phase.batch.maxTime, now)}</span>
+          <span className="sr-only">5 minutes from when it was prepared</span>.
         </span>
       </div>
     );
@@ -76,6 +81,18 @@ function PayPanel({ run, phase, onPay, onReview }: { run: Run; phase: PayPhase; 
     body = (
       <div role="alert" className="alert">
         <b>Payment paused.</b> {phase.message}
+      </div>
+    );
+  }
+
+  if (lapsed && !working && phase.kind !== "signing") {
+    body = (
+      <div className="notice" role="status" style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <span className="spinner" aria-hidden="true" />
+        <span>
+          <b>Batch {lapsed.number} wasn&apos;t signed in time.</b> Stellar is confirming it can no longer go through (up to a couple of minutes). Nothing was sent; you
+          can sign a fresh batch as soon as it&apos;s confirmed.
+        </span>
       </div>
     );
   }
@@ -99,10 +116,10 @@ function PayPanel({ run, phase, onPay, onReview }: { run: Run; phase: PayPhase; 
   const busy = phase.kind === "starting" || phase.kind === "preparing" || phase.kind === "signing" || phase.kind === "submitting";
   const action =
     run.status === "DRAFT" ? (
-      <button type="button" className="btn btn-primary btn-lg" onClick={onReview} disabled={run.items.length === 0 || busy}>
-        Review and pay {formatAmount(run.total)} USDC
+      <button type="button" className="btn btn-primary btn-lg" onClick={onReview} disabled={run.items.length === 0 || busy || saving} aria-busy={saving}>
+        {saving ? "Saving amounts…" : `Review and pay ${formatAmount(run.total)} USDC`}
       </button>
-    ) : run.status === "PAYING" && open?.status !== "SUBMITTED" ? (
+    ) : run.status === "PAYING" && open?.status !== "SUBMITTED" && !lapsed ? (
       <button type="button" className="btn btn-primary btn-lg" onClick={onPay} disabled={busy} aria-busy={busy}>
         <Icon name="freighter" size={18} /> {open ? `Sign batch ${open.number} in Freighter` : run.counts.pending > 0 ? `Sign and pay the remaining ${run.counts.pending}` : "Continue"}
       </button>
@@ -143,7 +160,7 @@ function Totals({ run }: { run: Run }) {
   const pick = (s: string) => sumAmounts(run.items.filter((i) => i.status === s).map((i) => i.amount));
   const rows: [string, string, number][] = [
     ["Paid", pick("PAID"), run.counts.paid],
-    ["Sending", pick("SENDING"), run.counts.sending],
+    ["Sending or awaiting signature", pick("SENDING"), run.counts.sending],
     ["To pay", pick("PENDING"), run.counts.pending],
     ["Not sent", pick("FAILED"), run.counts.failed],
   ];
@@ -183,7 +200,18 @@ function RunView({ run }: { run: Run }) {
   const router = useRouter();
   const toast = useToast();
   const { mutate } = useSWRConfig();
-  const { phase, pay } = usePayRun(run);
+  const { phase, pay, reset } = usePayRun(run);
+  const [saving, setSaving] = useState(0);
+  const openBatch = run.batches.some((b) => b.status === "AWAITING_SIGNATURE" || b.status === "SUBMITTED");
+  // A paused-payment message is about a moment that has passed once the run moves on.
+  const seen = useRef(`${run.status}:${run.counts.paid}:${run.batches.length}`);
+  useEffect(() => {
+    const now = `${run.status}:${run.counts.paid}:${run.batches.length}`;
+    if (now !== seen.current) {
+      seen.current = now;
+      if (phase.kind === "error" || phase.kind === "expiring") reset();
+    }
+  }, [run.status, run.counts.paid, run.batches.length, phase.kind, reset]);
   const [review, setReview] = useState(false);
   const [adding, setAdding] = useState(false);
   const [confirm, setConfirm] = useState<"cancel" | "delete" | null>(null);
@@ -275,7 +303,7 @@ function RunView({ run }: { run: Run }) {
           </div>
         )}
 
-        <PayPanel run={run} phase={phase} onPay={() => void pay()} onReview={() => setReview(true)} />
+        <PayPanel run={run} phase={phase} saving={saving > 0} onPay={() => void pay()} onReview={() => setReview(true)} />
         <FailuresCallout run={run} onRetry={() => void act("retry")} retrying={busy === "retry"} />
 
         <div className="tear" style={{ paddingTop: 18 }}>
@@ -286,7 +314,7 @@ function RunView({ run }: { run: Run }) {
               </button>
             </div>
           ) : null}
-          <Lines run={run} />
+          <Lines run={run} onSaving={(d) => setSaving((n) => Math.max(0, n + d))} />
         </div>
         <Totals run={run} />
       </article>
@@ -302,7 +330,13 @@ function RunView({ run }: { run: Run }) {
             Delete draft
           </button>
         ) : run.status === "PAYING" || run.counts.failed > 0 ? (
-          <button type="button" className="btn btn-danger" onClick={() => setConfirm("cancel")} disabled={run.status === "PAID" || run.status === "CANCELLED"}>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => setConfirm("cancel")}
+            disabled={openBatch}
+            title={openBatch ? "A batch is waiting for a signature or for Stellar. Wait for it to finish or expire." : undefined}
+          >
             {run.status === "PAYING" ? "Cancel unsent payments" : "Give up on failed payments"}
           </button>
         ) : null}

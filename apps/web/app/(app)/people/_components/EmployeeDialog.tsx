@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { cloneElement, useState } from "react";
 import { useSWRConfig } from "swr";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
@@ -67,6 +67,7 @@ export function EmployeeDialog({ open, onClose, employee }: { open: boolean; onC
       if (groupId === "__new") {
         const created = await api.post<{ group: { id: string } }>("/v1/groups", { name: newGroup.trim() });
         gid = created.group.id;
+        setGroupId(gid); // a retry after a failed save must not create the group again
       }
       const body = {
         name: name.trim(),
@@ -96,18 +97,20 @@ export function EmployeeDialog({ open, onClose, employee }: { open: boolean; onC
     }
   };
 
-  const field = (id: string, label: string, input: React.ReactNode, err: string | null, hint?: string) => (
+  const field = (id: string, label: string, input: React.ReactElement<{ "aria-describedby"?: string; "aria-invalid"?: boolean }>, err: string | null, hint?: string) => (
     <div className="field">
       <label htmlFor={id} className="label">
         {label}
       </label>
-      {input}
+      {cloneElement(input, { "aria-describedby": err ? `${id}-err` : hint ? `${id}-hint` : undefined, "aria-invalid": err ? true : undefined })}
       {err ? (
         <span id={`${id}-err`} className="field-error">
           {err}
         </span>
       ) : hint ? (
-        <span className="hint">{hint}</span>
+        <span id={`${id}-hint`} className="hint">
+          {hint}
+        </span>
       ) : null}
     </div>
   );

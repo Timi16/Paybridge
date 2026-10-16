@@ -3,7 +3,7 @@
 import useSWR from "swr";
 import { Dialog } from "@/components/Dialog";
 import { Icon } from "@/components/Icon";
-import { errorMessage } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
 import { formatAmount, shortAddress } from "@/lib/format";
 import { FUNDING_PROBLEM, REASON_FIX, REASON_SHORT } from "@/lib/payroll";
 import type { Run, RunCheck } from "@/lib/types";
@@ -13,8 +13,14 @@ import type { Run, RunCheck } from "@/lib/types";
  * wallet covers it. People who can't receive are shown by name and left out; nothing is sent to them.
  */
 export function ReviewDialog({ run, open, onClose, onPay }: { run: Run; open: boolean; onClose: () => void; onPay: () => void }) {
-  const { data, error, isLoading, mutate } = useSWR<{ check: RunCheck }>(open ? `/v1/payroll-runs/${run.id}/check` : null, { revalidateOnFocus: false });
-  const check = data?.check;
+  // Keyed on the run's current total and last edit, so an amount changed since the last check is
+  // never shown, and nothing can be paid while a re-check is still running.
+  const { data, error, isLoading, isValidating, mutate } = useSWR<{ check: RunCheck }>(
+    open ? `/v1/payroll-runs/${run.id}/check?v=${encodeURIComponent(`${run.totalStroops}:${run.updatedAt}`)}` : null,
+    () => api.get<{ check: RunCheck }>(`/v1/payroll-runs/${run.id}/check`),
+    { revalidateOnFocus: false, keepPreviousData: false },
+  );
+  const check = isValidating ? undefined : data?.check;
   const byId = new Map(run.items.map((i) => [i.id, i]));
   const excluded = check?.lines.filter((l) => !l.ok) ?? [];
   const batches = check ? Math.max(1, Math.ceil(check.payableCount / 100)) : 1;
@@ -22,7 +28,7 @@ export function ReviewDialog({ run, open, onClose, onPay }: { run: Run; open: bo
 
   return (
     <Dialog open={open} onClose={onClose} title="Review and pay" width={600}>
-      {isLoading || (!check && !error) ? (
+      {isLoading || isValidating || (!check && !error) ? (
         <div role="status" style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0" }} className="muted">
           <span className="spinner" aria-hidden="true" /> Checking every wallet on Stellar Testnet…
         </div>

@@ -20,8 +20,13 @@ const SAMPLE = `name,wallet,amount,group,email
 Ada Okafor,GBQ2…,3200,Contractors,ada@example.com
 Marcus Silva,GDA1…,6800,Engineering,`;
 
-/** Splits one CSV line, honouring double quotes. */
-function cells(line: string): string[] {
+/** The one delimiter a file uses, read from its header row: tab (a spreadsheet paste), then ; then ,. */
+function delimiterOf(header: string): string {
+  return header.includes("\t") ? "\t" : header.includes(";") ? ";" : ",";
+}
+
+/** Splits one line on `sep` only, honouring double quotes ("1,500.00" stays one cell). */
+function cells(line: string, sep: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quoted = false;
@@ -34,7 +39,7 @@ function cells(line: string): string[] {
       } else if (c === '"') quoted = false;
       else cur += c;
     } else if (c === '"') quoted = true;
-    else if (c === "," || c === "\t" || c === ";") {
+    else if (c === sep) {
       out.push(cur.trim());
       cur = "";
     } else cur += c;
@@ -47,17 +52,25 @@ function cells(line: string): string[] {
 function parse(text: string): { rows: Row[]; problems: string[] } {
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) return { rows: [], problems: lines.length ? ["Add at least one person under the header row."] : [] };
-  const header = cells(lines[0] ?? "").map((h) => h.toLowerCase());
-  const col = (...names: string[]) => header.findIndex((h) => names.some((n) => h.includes(n)));
-  const iName = col("name");
-  const iWallet = col("wallet", "address", "stellar");
-  const iAmount = col("amount", "salary", "pay");
-  const iGroup = col("group", "team", "department");
-  const iEmail = col("email");
+  const sep = delimiterOf(lines[0] ?? "");
+  const header = cells(lines[0] ?? "", sep).map((h) => h.toLowerCase().trim());
+  // Exact column names first, then a looser match that never claims a column already taken.
+  const taken = new Set<number>();
+  const col = (exact: string[], loose: string[] = []) => {
+    let i = header.findIndex((h, j) => !taken.has(j) && exact.includes(h));
+    if (i < 0) i = header.findIndex((h, j) => !taken.has(j) && loose.some((n) => h.includes(n)));
+    if (i >= 0) taken.add(i);
+    return i;
+  };
+  const iEmail = col(["email", "e-mail", "email address"], ["email"]);
+  const iWallet = col(["wallet", "address", "stellar address", "wallet address", "public key"], ["wallet", "stellar"]);
+  const iName = col(["name", "full name", "employee"], ["name"]);
+  const iAmount = col(["amount", "salary", "pay", "default amount"], ["amount", "salary"]);
+  const iGroup = col(["group", "team", "department"], ["group", "team", "department"]);
   const problems: string[] = [];
   if (iName < 0 || iWallet < 0 || iAmount < 0) return { rows: [], problems: ["The first row must name the columns, including name, wallet and amount."] };
   const rows = lines.slice(1).map((line, n) => {
-    const c = cells(line);
+    const c = cells(line, sep);
     const row: Row = {
       name: c[iName] ?? "",
       walletAddress: (c[iWallet] ?? "").toUpperCase(),

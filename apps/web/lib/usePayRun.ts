@@ -15,12 +15,15 @@ export type PayPhase =
   | { kind: "submitting"; batch: SignableBatch }
   /** Stellar hasn't answered yet; the worker will settle it. */
   | { kind: "confirming"; batch: Batch }
+  /** An unsigned batch's window has passed by our clock; Stellar has to confirm it can't land before a new one is built. */
+  | { kind: "expiring"; batch: Batch }
   | { kind: "done" }
   | { kind: "error"; message: string };
 
 function message(err: unknown): string {
   if (err instanceof FreighterError) return err.message || FREIGHTER_MESSAGES[err.code];
-  if (err instanceof ApiError || err instanceof Error) return errorMessage(err);
+  if (err instanceof ApiError) return errorMessage(err);
+  if (err instanceof Error) return err.message;
   return "Something went wrong. Nothing more was sent. Try again.";
 }
 
@@ -65,15 +68,23 @@ export function usePayRun(run: Run) {
         const next = await api.post<{ batch: SignableBatch | null; run: Run }>(`/v1/payroll-runs/${run.id}/batches/next`);
         await refresh(next.run);
         if (!next.batch) {
-          const open = next.run.batches.find((b) => b.status === "SUBMITTED");
-          setPhase(open ? { kind: "confirming", batch: open } : { kind: "done" });
+          const submitted = next.run.batches.find((b) => b.status === "SUBMITTED");
+          const unsigned = next.run.batches.find((b) => b.status === "AWAITING_SIGNATURE");
+          setPhase(submitted ? { kind: "confirming", batch: submitted } : unsigned ? { kind: "expiring", batch: unsigned } : { kind: "done" });
           return;
         }
         const batch = next.batch;
         setPhase({ kind: "signing", batch });
         const signedXdr = await signTransactionWithFreighter(batch.xdr, run.wallet.address);
         setPhase({ kind: "submitting", batch });
-        const res = await api.post<{ batch: Batch; run: Run }>(`/v1/payroll-runs/${run.id}/batches/${batch.id}/submit`, { signedXdr });
+        let res: { batch: Batch; run: Run };
+        try {
+          res = await api.post<{ batch: Batch; run: Run }>(`/v1/payroll-runs/${run.id}/batches/${batch.id}/submit`, { signedXdr });
+        } catch (err) {
+          // The signed batch may already be on its way: never suggest it wasn't sent.
+          if (err instanceof ApiError && err.code !== "NETWORK" && err.status < 500) throw err;
+          throw new Error(`We couldn't hear back after sending batch ${batch.number}. It may have gone through: this page is checking with Stellar and will update by itself. Don't sign anything else until it does.`, { cause: err });
+        }
         await refresh(res.run);
         if (res.batch.status === "SUBMITTED") {
           setPhase({ kind: "confirming", batch: res.batch });
@@ -90,5 +101,6 @@ export function usePayRun(run: Run) {
   }, [refresh, run.id, run.status, run.wallet.address]);
 
   const busy = phase.kind === "starting" || phase.kind === "preparing" || phase.kind === "signing" || phase.kind === "submitting";
-  return { phase, pay, busy, reset: () => setPhase({ kind: "idle" }) };
+  const reset = useCallback(() => setPhase({ kind: "idle" }), []);
+  return { phase, pay, busy, reset };
 }

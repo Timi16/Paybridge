@@ -16,7 +16,8 @@ export default tseslint.config(
       "no-restricted-syntax": [
         "error",
         {
-          selector: "CallExpression[callee.name='parseFloat'], CallExpression[callee.name='Number']",
+          selector:
+            "CallExpression[callee.name='parseFloat'], CallExpression[callee.name='Number'], CallExpression[callee.object.name='Number'][callee.property.name='parseFloat']",
           message: "Money is never a float. Amounts stay decimal strings; use lib/format.",
         },
       ],

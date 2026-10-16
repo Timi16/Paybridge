@@ -46,6 +46,7 @@ function PeopleView() {
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [archiving, setArchiving] = useState<string | null>(null);
 
   const setParam = (k: string, v: string | null) => {
     const next = new URLSearchParams(params.toString());
@@ -72,12 +73,16 @@ function PeopleView() {
   };
 
   const archive = async (e: Employee) => {
+    if (archiving) return;
+    setArchiving(e.id);
     try {
       await api.post(`/v1/employees/${e.id}/${e.archived ? "restore" : "archive"}`);
       await invalidateEmployees(mutate);
       toast(e.archived ? `${e.name} restored` : `${e.name} archived · left out of new runs`);
     } catch (err) {
       toast(errorMessage(err));
+    } finally {
+      setArchiving(null);
     }
   };
 
@@ -226,7 +231,7 @@ function PeopleView() {
                         Edit
                       </button>
                       <span className="faint"> · </span>
-                      <button type="button" className="btn-link" style={{ color: "var(--ink-2)" }} onClick={() => void archive(e)} aria-label={`${e.archived ? "Restore" : "Archive"} ${e.name}`}>
+                      <button type="button" className="btn-link" style={{ color: "var(--ink-2)" }} disabled={archiving === e.id} onClick={() => void archive(e)} aria-label={`${e.archived ? "Restore" : "Archive"} ${e.name}`}>
                         {e.archived ? "Restore" : "Archive"}
                       </button>
                     </td>

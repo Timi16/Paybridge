@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useSWRConfig } from "swr";
 import { CopyButton } from "@/components/CopyButton";
 import { Icon } from "@/components/Icon";
-import { ItemStatusPill } from "@/components/StatusPill";
+import { ItemStatusPill, Pill } from "@/components/StatusPill";
 import { useToast } from "@/components/Toast";
 import { api, errorMessage } from "@/lib/api";
 import { explorerTx } from "@/lib/config";
@@ -25,7 +25,7 @@ const FILTERS: { id: Filter; label: string }[] = [
 const AMOUNT = /^\d{1,12}(\.\d{1,7})?$/;
 
 /** A draft line's amount, saved when the field loses focus (or on Enter). */
-function AmountCell({ run, item }: { run: Run; item: RunItem }) {
+function AmountCell({ run, item, onSaving }: { run: Run; item: RunItem; onSaving: (delta: 1 | -1) => void }) {
   const { mutate } = useSWRConfig();
   const toast = useToast();
   const initial = formatAmount(item.amount, 2).replace(/,/g, "");
@@ -38,6 +38,7 @@ function AmountCell({ run, item }: { run: Run; item: RunItem }) {
     if (v === initial) return setError(null);
     if (!AMOUNT.test(v) || !/[1-9]/.test(v)) return setError("Enter an amount above 0, up to 7 decimals.");
     setBusy(true);
+    onSaving(1);
     setError(null);
     try {
       const res = await api.patch<{ run: Run }>(`/v1/payroll-runs/${run.id}/items/${item.id}`, { amount: v });
@@ -47,9 +48,11 @@ function AmountCell({ run, item }: { run: Run; item: RunItem }) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
+      onSaving(-1);
     }
   };
 
+  const errId = `amount-err-${item.id}`;
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
       <input
@@ -59,6 +62,7 @@ function AmountCell({ run, item }: { run: Run; item: RunItem }) {
         inputMode="decimal"
         aria-label={`Amount for ${item.name}, USDC`}
         aria-invalid={Boolean(error)}
+        aria-describedby={error ? errId : undefined}
         disabled={busy}
         onChange={(e) => setValue(e.target.value)}
         onBlur={() => void save()}
@@ -66,7 +70,7 @@ function AmountCell({ run, item }: { run: Run; item: RunItem }) {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         }}
       />
-      {error ? <span className="field-error" style={{ fontSize: 12, maxWidth: 180, textAlign: "right" }}>{error}</span> : null}
+      {error ? <span id={errId} className="field-error" style={{ fontSize: 12, maxWidth: 180, textAlign: "right" }}>{error}</span> : null}
     </div>
   );
 }
@@ -92,21 +96,32 @@ function Outcome({ item }: { item: RunItem }) {
   return null;
 }
 
-export function Lines({ run }: { run: Run }) {
+export function Lines({ run, onSaving }: { run: Run; onSaving: (delta: 1 | -1) => void }) {
   const { mutate } = useSWRConfig();
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
+  const [removing, setRemoving] = useState<Set<string>>(new Set());
+  // Lines in a batch nobody has signed yet are not "sending": they wait for the company's signature.
+  const unsigned = new Set(run.batches.filter((b) => b.status === "AWAITING_SIGNATURE").map((b) => b.number));
   const draft = run.status === "DRAFT";
   const count = (f: Filter) => (f === "all" ? run.items.length : run.items.filter((i) => i.status === f).length);
   const shown = filter === "all" ? run.items : run.items.filter((i) => i.status === filter);
 
   const remove = async (item: RunItem) => {
+    if (removing.has(item.id)) return;
+    setRemoving((s) => new Set(s).add(item.id));
     try {
       const res = await api.delete<{ run: Run }>(`/v1/payroll-runs/${run.id}/items/${item.id}`);
       await mutate(`/v1/payroll-runs/${run.id}`, res, { revalidate: false });
       toast(`${item.name} removed from this run`);
     } catch (err) {
       toast(errorMessage(err));
+    } finally {
+      setRemoving((s) => {
+        const next = new Set(s);
+        next.delete(item.id);
+        return next;
+      });
     }
   };
 
@@ -156,11 +171,17 @@ export function Lines({ run }: { run: Run }) {
                       <span title={item.walletAddress}>{shortAddress(item.walletAddress, 5, 5)}</span>
                     </span>
                   </td>
-                  <td className="num">{draft ? <AmountCell run={run} item={item} /> : formatAmount(item.amount)}</td>
+                  <td className="num">{draft ? <AmountCell run={run} item={item} onSaving={onSaving} /> : formatAmount(item.amount)}</td>
                   <td className="full">
                     {draft ? null : (
                       <>
-                        <ItemStatusPill status={item.status} />
+                        {item.status === "SENDING" && item.batchNumber !== null && unsigned.has(item.batchNumber) ? (
+                          <Pill tone="info" icon="pen">
+                            Awaiting signature
+                          </Pill>
+                        ) : (
+                          <ItemStatusPill status={item.status} />
+                        )}
                         {item.batchNumber && item.status === "SENDING" ? <span className="faint" style={{ fontSize: 12, marginLeft: 8 }}>batch {item.batchNumber}</span> : null}
                         <div>
                           <Outcome item={item} />
@@ -185,7 +206,7 @@ export function Lines({ run }: { run: Run }) {
                   ) : null}
                   {draft ? (
                     <td style={{ textAlign: "right" }}>
-                      <button type="button" className="icon-btn" aria-label={`Remove ${item.name} from this run`} onClick={() => void remove(item)}>
+                      <button type="button" className="icon-btn" aria-label={`Remove ${item.name} from this run`} disabled={removing.has(item.id)} onClick={() => void remove(item)}>
                         <Icon name="x" size={16} />
                       </button>
                     </td>
