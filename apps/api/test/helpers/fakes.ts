@@ -71,6 +71,8 @@ export class FakeStellar implements StellarGateway {
   readonly txs = new Map<string, FoundTransaction>();
   /** Signed envelopes accepted with an "unknown" outcome, which can be landed later. */
   readonly inFlight: string[] = [];
+  /** Hashes a lagging Horizon node doesn't know about yet (getTransaction says 404). */
+  readonly lagging = new Set<string>();
   ledger = 1000;
   ledgerTime = new Date();
   down = false;
@@ -152,6 +154,7 @@ export class FakeStellar implements StellarGateway {
 
   async getTransaction(hash: string): Promise<FoundTransaction | null> {
     if (this.down) throw new AppError("HORIZON_UNAVAILABLE", "Horizon is down");
+    if (this.lagging.has(hash)) return null;
     return this.txs.get(hash) ?? null;
   }
 

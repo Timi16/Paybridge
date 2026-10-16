@@ -22,7 +22,7 @@ const RECIPIENT_CODES: Record<string, FailureCode> = {
   op_line_full: "TRUSTLINE_LIMIT_TOO_LOW",
 };
 /** Codes that are not the recipient's fault (or are success inside a failed transaction). */
-const NOT_RECIPIENT = new Set(["op_success", "op_underfunded", "op_src_no_trust", "op_src_not_authorized", "op_no_issuer", "op_bad_auth", "op_too_many_subentries"]);
+const NOT_RECIPIENT = new Set(["op_success", "op_underfunded", "op_src_no_trust", "op_src_not_authorized", "op_no_issuer", "op_bad_auth", "op_no_account", "op_too_many_subentries"]);
 
 export function lineFailure(opCode: string | undefined): FailureCode | null {
   if (!opCode || NOT_RECIPIENT.has(opCode)) return null;

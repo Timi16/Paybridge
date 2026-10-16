@@ -6,7 +6,8 @@ import { uniqueViolation } from "../../db/prisma";
 import type { AppDeps } from "../../deps";
 import { AppError } from "../../lib/errors";
 import { generateSessionToken, hashSessionToken } from "../../lib/ids";
-import { finishIfDone, lockRun, recordEvent, transitionItems, transitionRun } from "../payroll/transitions";
+import { cancelRun } from "../payroll/service";
+import { lockRun } from "../payroll/transitions";
 import * as repo from "./repo";
 import { ACCOUNT_RULE, accountKey, LoginThrottle, PAIR_RULE, pairKey, passwordChangeKey } from "./throttle";
 
@@ -145,26 +146,22 @@ export function createAuthService(deps: AppDeps) {
       await throttle.clear([key]);
       await prisma.$transaction(
         async (tx) => {
+          // Every run that could still pay someone. Each is re-read under its lock, so a retry
+          // that slipped in after this list is still seen.
           const open = await tx.payrollRun.findMany({
-            where: { companyId, status: { in: ["DRAFT", "PAYING"] } },
+            where: { companyId, status: { in: ["DRAFT", "PAYING", "PARTIAL", "FAILED"] } },
             select: { id: true },
             orderBy: { id: "asc" },
           });
           for (const { id } of open) {
             const run = await lockRun(tx, companyId, id);
-            if (!run) continue;
-            const busy = await tx.payrollBatch.count({ where: { runId: id, status: { in: ["AWAITING_SIGNATURE", "SUBMITTED"] } } });
-            if (busy > 0) {
-              throw new AppError("RUN_LOCKED", `Payroll #${run.number} has a batch waiting for a signature or for Stellar. Let it finish, then close the account.`);
-            }
-            const pending = await tx.payrollItem.findMany({ where: { runId: id, status: "PENDING" }, select: { id: true } });
-            await transitionItems(tx, id, pending.map((p) => p.id), "PENDING", "CANCELLED");
-            if (run.status === "DRAFT") {
-              await transitionRun(tx, run, "CANCELLED", "company", { data: { finishedAt: new Date() }, event: { type: "cancelled", message: "Cancelled: account closed" } });
-            } else {
-              await recordEvent(tx, id, "company", { type: "cancelled", message: "Account closed: payments not yet sent were cancelled" });
-              await finishIfDone(tx, id, "company");
-            }
+            if (!run || run.status === "PAID" || run.status === "CANCELLED") continue;
+            await cancelRun(tx, run, "company").catch((err: unknown) => {
+              if (err instanceof AppError && err.code === "RUN_LOCKED") {
+                throw new AppError("RUN_LOCKED", `Payroll #${run.number} has a batch waiting for a signature or for Stellar. Let it finish, then close the account.`);
+              }
+              throw err;
+            });
           }
           const now = new Date();
           await tx.session.deleteMany({ where: { companyId } });

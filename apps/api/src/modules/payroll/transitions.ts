@@ -10,7 +10,7 @@ export const RUN_ALLOWED: Record<RunStatus, RunStatus[]> = {
   DRAFT: ["PAYING", "CANCELLED"],
   PAYING: ["PAID", "PARTIAL", "FAILED", "CANCELLED"],
   PARTIAL: ["PAYING"], // retry
-  FAILED: ["PAYING"], // retry
+  FAILED: ["PAYING", "CANCELLED"], // retry, or give up on everyone
   PAID: [],
   CANCELLED: [],
 };
@@ -18,7 +18,7 @@ export const RUN_ALLOWED: Record<RunStatus, RunStatus[]> = {
 export const ITEM_ALLOWED: Record<ItemStatus, ItemStatus[]> = {
   PENDING: ["SENDING", "FAILED", "CANCELLED"],
   SENDING: ["PAID", "FAILED", "PENDING"],
-  FAILED: ["PENDING"], // retry
+  FAILED: ["PENDING", "CANCELLED"], // retry, or give up
   PAID: [], // a paid line never changes again
   CANCELLED: [],
 };
@@ -118,10 +118,11 @@ export async function transitionBatch(
 
 /**
  * A PAYING run with nothing left to send or confirm is finished: PAID when no line failed,
- * PARTIAL when some were paid and some failed, FAILED when none were paid, CANCELLED when
- * every line was cancelled. Returns the new status, or null when the run is not finished.
+ * PARTIAL when some were paid and some failed, FAILED when none were paid. After a cancel, a run
+ * that paid nobody is CANCELLED and one that paid some is PARTIAL (never "PAID": not everyone
+ * was). Returns the new status, or null when the run is not finished.
  */
-export async function finishIfDone(tx: Tx, runId: string, actor: Actor): Promise<RunStatus | null> {
+export async function finishIfDone(tx: Tx, runId: string, actor: Actor, opts: { cancelled?: boolean } = {}): Promise<RunStatus | null> {
   const run = await tx.payrollRun.findUnique({ where: { id: runId }, select: { id: true, status: true } });
   if (!run || run.status !== "PAYING") return null;
   const groups = await tx.payrollItem.groupBy({ by: ["status"], where: { runId }, _count: { _all: true } });
@@ -129,18 +130,26 @@ export async function finishIfDone(tx: Tx, runId: string, actor: Actor): Promise
   if (count("PENDING") > 0 || count("SENDING") > 0) return null;
   const paid = count("PAID");
   const failed = count("FAILED");
-  const to: RunStatus = paid === 0 && failed === 0 ? "CANCELLED" : failed === 0 ? "PAID" : paid === 0 ? "FAILED" : "PARTIAL";
-  const message =
-    to === "PAID"
-      ? `Finished: all ${paid} paid`
-      : to === "PARTIAL"
-        ? `Finished: ${paid} paid, ${failed} not paid`
-        : to === "FAILED"
-          ? `Finished: none of ${failed} paid`
-          : "Cancelled";
+  const cancelled = count("CANCELLED");
+  let to: RunStatus;
+  let message: string;
+  if (opts.cancelled || (paid === 0 && failed === 0)) {
+    to = paid > 0 ? "PARTIAL" : "CANCELLED";
+    message = paid > 0 ? `Cancelled after ${paid} paid; ${cancelled + failed} not paid` : "Cancelled: nobody was paid";
+  } else if (failed === 0) {
+    to = "PAID";
+    message = `Finished: all ${paid} paid`;
+  } else if (paid === 0) {
+    to = "FAILED";
+    message = `Finished: none of ${failed} paid`;
+  } else {
+    to = "PARTIAL";
+    message = `Finished: ${paid} paid, ${failed} not paid`;
+  }
   await transitionRun(tx, run, to, actor, {
-    data: { finishedAt: new Date(), notifiedAt: null },
-    event: { type: to === "CANCELLED" ? "cancelled" : "finished", message },
+    // A cancelled finish sends no "run finished" email (notifiedAt set).
+    data: { finishedAt: new Date(), notifiedAt: opts.cancelled ? new Date() : null },
+    event: { type: opts.cancelled ? "cancelled" : "finished", message },
   });
   return to;
 }

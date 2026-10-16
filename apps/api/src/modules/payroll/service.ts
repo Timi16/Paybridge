@@ -19,6 +19,8 @@ import { assignToBatch, finishIfDone, lockRun, recordEvent, transitionBatch, tra
 
 /** Most lines on one run. */
 export const MAX_RUN_LINES = 1000;
+/** How long past its window a batch whose sequence number was used must stay unfound before it counts as expired. */
+export const EXPIRY_GRACE_MS = 2 * 60_000;
 
 const locked = (message = "This run can only be changed while it is a draft") => new AppError("RUN_LOCKED", message);
 const changedMeanwhile = () => locked("The run changed while PayBridge was checking it. Try again.");
@@ -35,6 +37,31 @@ function sameLines(checked: PayrollItem[], now: PayrollItem[]): boolean {
     const n = byId.get(c.id);
     return n !== undefined && n.amountStroops === c.amountStroops && n.walletAddress === c.walletAddress;
   });
+}
+
+/** Cancels whatever of a run has not been paid. Caller holds the run lock. Shared with account closing. */
+export async function cancelRun(tx: Tx, run: PayrollRun, actor: Actor): Promise<void> {
+  const unpaid = async (status: "PENDING" | "FAILED") =>
+    (await tx.payrollItem.findMany({ where: { runId: run.id, status }, select: { id: true } })).map((i) => i.id);
+  if (run.status === "DRAFT") {
+    await transitionItems(tx, run.id, await unpaid("PENDING"), "PENDING", "CANCELLED");
+    await transitionRun(tx, run, "CANCELLED", actor, { data: { finishedAt: new Date() }, event: { type: "cancelled", message: "Draft cancelled" } });
+    return;
+  }
+  if (run.status === "PAID" || run.status === "CANCELLED") throw new AppError("RUN_LOCKED", "This run is already finished");
+  if (await tx.payrollBatch.count({ where: { runId: run.id, status: { in: ["AWAITING_SIGNATURE", "SUBMITTED"] } } })) {
+    throw new AppError("RUN_LOCKED", "A batch is waiting for a signature or for Stellar. Wait for it to finish or expire, then cancel.");
+  }
+  const pending = await unpaid("PENDING");
+  const failed = await unpaid("FAILED");
+  await transitionItems(tx, run.id, pending, "PENDING", "CANCELLED");
+  await transitionItems(tx, run.id, failed, "FAILED", "CANCELLED");
+  if (run.status === "PAYING") {
+    await finishIfDone(tx, run.id, actor, { cancelled: true });
+  } else {
+    if (run.status === "FAILED") await transitionRun(tx, run, "CANCELLED", actor);
+    await recordEvent(tx, run.id, actor, { type: "cancelled", message: `Gave up on ${failed.length} payment(s) that weren't sent` });
+  }
 }
 
 export function createPayrollService(deps: AppDeps) {
@@ -140,17 +167,29 @@ export function createPayrollService(deps: AppDeps) {
     }
   }
 
-  /** Asks Stellar what became of an open batch and settles it if the answer is final. */
+  /**
+   * Asks Stellar what became of an open batch and settles it if the answer is final.
+   *
+   * "Expired" must be certain, or the next batch would pay the same people again. So the account
+   * and the latest ledger are read BEFORE the hash is looked up (anything that landed by then is
+   * findable), and a batch whose sequence number the funding account has already used is only
+   * expired after a grace period: a lagging Horizon node can miss a transaction that did land.
+   */
   async function resolveBatch(batch: PayrollBatch, actor: Actor): Promise<boolean> {
-    const ledger = await stellar.latestLedger(); // read first: anything landed by now is findable below
+    const run = await prisma.payrollRun.findUnique({ where: { id: batch.runId }, select: { walletAddress: true } });
+    if (!run) return false;
+    const account = await stellar.loadAccount(run.walletAddress);
+    const ledger = await stellar.latestLedger();
     const found = await stellar.getTransaction(batch.txHash);
     let outcome: BatchOutcome | null = null;
     if (found) {
       outcome = found.successful
         ? { kind: "success", ledger: found.ledger, closedAt: found.closedAt }
         : { kind: "failed", ...decodeResultXdr(found.resultXdr) };
-    } else if (ledger.closedAt.getTime() > batch.maxTime.getTime()) {
-      outcome = { kind: "expired" };
+    } else {
+      const sequenceUsed = account.exists && BigInt(account.sequence) >= BigInt(batch.sequence);
+      const deadline = batch.maxTime.getTime() + (sequenceUsed ? EXPIRY_GRACE_MS : 0);
+      if (ledger.closedAt.getTime() > deadline) outcome = { kind: "expired" };
     }
     if (!outcome) return false;
     const settled = outcome;
@@ -158,27 +197,38 @@ export function createPayrollService(deps: AppDeps) {
   }
 
   /**
-   * A submission Stellar refused before it reached a ledger. Settled only when the envelope can
-   * provably never land; otherwise it stays SUBMITTED and the confirmer expires it by ledger time.
+   * Sends a signed batch to Stellar and records a final answer if there is one. A rejection before
+   * a ledger (bad sequence, fee, …) is never treated as final here: the same envelope could still
+   * land, so the batch stays SUBMITTED and resolveBatch settles it from the ledger.
    */
-  async function handleRejection(batch: PayrollBatch, source: string, txCode: string, actor: Actor): Promise<void> {
-    if (await resolveBatch(batch, actor)) return;
-    let final = false;
-    if (txCode === "tx_bad_seq") {
-      const account = await stellar.loadAccount(source);
-      // Sequence numbers only grow: once the account is at or past this one, it can never be used.
-      final = account.exists && BigInt(account.sequence) >= BigInt(batch.sequence);
-    }
-    if (final) {
-      await inRunLock(batch.companyId, batch.runId, (tx) => settleBatch(tx, batch.id, { kind: "failed", txCode, opCodes: [] }, actor));
-    } else {
-      await prisma.payrollBatch.updateMany({ where: { id: batch.id, status: "SUBMITTED" }, data: { resultCode: txCode } });
+  async function broadcast(batch: PayrollBatch, signedXdr: string, actor: Actor): Promise<void> {
+    const result = await stellar.submit(signedXdr);
+    if (result.kind === "success") {
+      await inRunLock(batch.companyId, batch.runId, (tx) => settleBatch(tx, batch.id, { kind: "success", ledger: result.ledger, closedAt: result.closedAt }, actor));
+    } else if (result.kind === "failed" && result.txCode === "tx_failed") {
+      await inRunLock(batch.companyId, batch.runId, (tx) => settleBatch(tx, batch.id, result, actor));
+    } else if (result.kind === "failed") {
+      await prisma.payrollBatch.updateMany({ where: { id: batch.id, status: "SUBMITTED" }, data: { resultCode: result.txCode } });
     }
   }
 
   return {
     getRun,
     resolveBatch,
+
+    /**
+     * Worker: settle an open batch from the ledger; if it is SUBMITTED, still inside its window and
+     * not on the ledger yet, send it again (the same envelope can only land once).
+     */
+    async confirm(batch: PayrollBatch): Promise<boolean> {
+      if (await resolveBatch(batch, "system")) return true;
+      if (batch.status === "SUBMITTED" && batch.signedXdr && batch.maxTime.getTime() > Date.now()) {
+        await broadcast(batch, batch.signedXdr, "system");
+        const after = await prisma.payrollBatch.findUnique({ where: { id: batch.id } });
+        return after !== null && !isOpen(after);
+      }
+      return false;
+    },
 
     async list(companyId: string, q: { status?: RunStatus; cursor?: string; limit: number }) {
       const rows = await repo.listRuns(prisma, companyId, q);
@@ -407,9 +457,15 @@ export function createPayrollService(deps: AppDeps) {
           let maxSeconds = Math.floor(Date.now() / 1000) + deps.batchWindowSeconds;
           if (last) maxSeconds = Math.max(maxSeconds, Math.floor(last.maxTime.getTime() / 1000) + 1);
           const maxTime = new Date(maxSeconds * 1000);
+          // A lagging Horizon node can report a sequence from before our last batch landed.
+          const landed = await tx.payrollBatch.findFirst({
+            where: { companyId, run: { walletAddress: current.walletAddress }, OR: [{ status: "CONFIRMED" }, { status: "FAILED", resultCode: "tx_failed" }] },
+            orderBy: { settledAt: "desc" },
+          });
+          const accountSequence = landed && BigInt(landed.sequence) > BigInt(funder.sequence) ? landed.sequence : funder.sequence;
           const envelope = buildBatchTransaction({
             source: current.walletAddress,
-            accountSequence: funder.sequence,
+            accountSequence,
             asset: { code: current.assetCode, issuer: current.assetIssuer },
             lines: payable.map((i) => ({ destination: i.walletAddress, amountStroops: i.amountStroops })),
             memo: batchMemo(current.number),
@@ -446,32 +502,21 @@ export function createPayrollService(deps: AppDeps) {
 
     /** Takes the signed batch, proves it is ours, submits it and records what Stellar says. */
     async submit(companyId: string, id: string, batchId: string, signedXdr: string, actor: Actor) {
-      const { batch, source, fresh } = await inRunLock(companyId, id, async (tx, run) => {
+      const { batch, fresh } = await inRunLock(companyId, id, async (tx, run) => {
         const batch = await repo.findBatch(tx, companyId, run.id, batchId);
         if (!batch) throw notFound("Batch");
         checkSignedBatch(signedXdr, { hash: batch.txHash, source: run.walletAddress });
         if (batch.status !== "AWAITING_SIGNATURE") {
           // Already submitted (a retry, a double click, or the confirmer got there): never send twice.
-          return { batch, source: run.walletAddress, fresh: false };
+          return { batch, fresh: false };
         }
         await transitionBatch(tx, batch, "SUBMITTED", { signedXdr, submittedAt: new Date() });
         await recordEvent(tx, run.id, actor, { type: "submitted", batchId: batch.id, message: `Batch ${batch.number} signed and sent to Stellar` });
-        return { batch, source: run.walletAddress, fresh: true };
+        return { batch, fresh: true };
       });
 
-      if (fresh) {
-        const result = await stellar.submit(signedXdr);
-        if (result.kind === "success") {
-          await inRunLock(companyId, id, (tx) => settleBatch(tx, batch.id, { kind: "success", ledger: result.ledger, closedAt: result.closedAt }, actor));
-        } else if (result.kind === "failed" && result.txCode === "tx_failed") {
-          await inRunLock(companyId, id, (tx) => settleBatch(tx, batch.id, result, actor));
-        } else if (result.kind === "failed") {
-          await handleRejection({ ...batch, status: "SUBMITTED" }, source, result.txCode, actor).catch((err: unknown) =>
-            deps.logger.warn({ err, batchId: batch.id }, "could not resolve a rejected batch yet"),
-          );
-        }
-        // unknown: stays SUBMITTED; the worker's confirmer settles it from the ledger.
-      }
+      if (fresh) await broadcast(batch, signedXdr, actor);
+      // Anything else ("unknown", or a rejection that isn't final) stays SUBMITTED for the confirmer.
       const after = await prisma.payrollBatch.findUniqueOrThrow({ where: { id: batch.id } });
       return { batch: serializeBatch(after), run: await getRun(companyId, id), settled: !isOpen(after) };
     },
@@ -514,23 +559,13 @@ export function createPayrollService(deps: AppDeps) {
       return getRun(companyId, id);
     },
 
+    /**
+     * A draft: cancelled outright. A run being paid: every line not yet sent (to pay, or failed)
+     * is cancelled, so a later retry can't pay it; refused while a batch is open. A finished run
+     * with failed lines: those lines are given up on.
+     */
     async cancel(companyId: string, id: string, actor: Actor) {
-      await inRunLock(companyId, id, async (tx, run) => {
-        if (run.status === "DRAFT") {
-          const pending = await tx.payrollItem.findMany({ where: { runId: run.id, status: "PENDING" }, select: { id: true } });
-          await transitionItems(tx, run.id, pending.map((p) => p.id), "PENDING", "CANCELLED");
-          await transitionRun(tx, run, "CANCELLED", actor, { data: { finishedAt: new Date() }, event: { type: "cancelled", message: "Draft cancelled" } });
-          return;
-        }
-        if (run.status !== "PAYING") throw locked("This run is already finished");
-        if (await repo.openBatch(tx, companyId, run.id)) {
-          throw locked("A batch is waiting for a signature or for Stellar. Wait for it to finish or expire, then cancel.");
-        }
-        const pending = await tx.payrollItem.findMany({ where: { runId: run.id, status: "PENDING" }, select: { id: true } });
-        await transitionItems(tx, run.id, pending.map((p) => p.id), "PENDING", "CANCELLED");
-        await recordEvent(tx, run.id, actor, { type: "cancelled", message: `Cancelled ${pending.length} payment(s) not yet sent` });
-        await finishIfDone(tx, run.id, actor);
-      });
+      await inRunLock(companyId, id, (tx, run) => cancelRun(tx, run, actor));
       return getRun(companyId, id);
     },
   };

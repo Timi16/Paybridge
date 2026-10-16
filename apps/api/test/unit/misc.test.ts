@@ -91,18 +91,18 @@ describe("wallet address rules", () => {
 });
 
 describe("status tables", () => {
-  it("PAID and CANCELLED runs are final; PARTIAL and FAILED can only go back to PAYING (retry)", () => {
+  it("PAID and CANCELLED runs are final; PARTIAL and FAILED go back to PAYING (retry), and a FAILED run can be given up on", () => {
     expect(RUN_ALLOWED.PAID).toEqual([]);
     expect(RUN_ALLOWED.CANCELLED).toEqual([]);
     expect(RUN_ALLOWED.PARTIAL).toEqual(["PAYING"]);
-    expect(RUN_ALLOWED.FAILED).toEqual(["PAYING"]);
+    expect(RUN_ALLOWED.FAILED).toEqual(["PAYING", "CANCELLED"]);
     expect(RUN_ALLOWED.DRAFT).toEqual(["PAYING", "CANCELLED"]);
   });
 
-  it("R13: a PAID line never changes again; only FAILED lines can be retried", () => {
+  it("R13: a PAID line never changes again; only FAILED lines can be retried (or given up on)", () => {
     expect(ITEM_ALLOWED.PAID).toEqual([]);
     expect(ITEM_ALLOWED.CANCELLED).toEqual([]);
-    expect(ITEM_ALLOWED.FAILED).toEqual(["PENDING"]);
+    expect(ITEM_ALLOWED.FAILED).toEqual(["PENDING", "CANCELLED"]);
     // Nothing goes straight from PENDING to PAID: a line is only paid through a batch.
     expect(ITEM_ALLOWED.PENDING).not.toContain("PAID");
     for (const final of ["CONFIRMED", "FAILED", "EXPIRED"] as const) expect(BATCH_ALLOWED[final]).toEqual([]);

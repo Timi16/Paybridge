@@ -15,7 +15,9 @@ Run-to-paid lifecycle
    becomes PAYING and its lines are frozen.
 3. Batch. POST /batches/next takes up to 100 PENDING lines, re-checks them and the funding wallet,
    and builds one unsigned transaction: source = funding wallet, sequence = account sequence + 1,
-   one USDC payment op per line, memo "Payroll #<number>", timebounds now → now + 5 min. Its hash
+   one USDC payment op per line, memo "PayBridge payroll #<number>", timebounds now → now + 5 min
+   (always strictly later than the run's previous batch, so a rebuilt envelope is never identical).
+   The sequence is never behind the last batch this wallet landed (a lagging node can report an older one). Its hash
    is stored; the lines become SENDING. While a batch is AWAITING_SIGNATURE and its window is open,
    asking again returns the same envelope: a second envelope that could also land is never built.
 4. Sign. The dashboard asks Freighter to sign the XDR with the funding wallet.
@@ -27,16 +29,23 @@ Run-to-paid lifecycle
      on the recipient's side (no account, no trustline, not authorised, line full) becomes FAILED
      with that reason; every other line goes back to PENDING (it was not sent and will go in the
      next batch).
-   • Rejected before a ledger (bad sequence, too late, bad auth, fee) → batch FAILED; all its
-     lines back to PENDING.
+   • Rejected before a ledger (bad sequence, too late, bad auth, fee) → NOT final: the same
+     envelope may already have landed elsewhere, or still land. The code is recorded, the batch
+     stays SUBMITTED and the confirmer settles it.
    • Timeout or 5xx → batch stays SUBMITTED; the worker resolves it.
-6. Confirmer (worker, every 5 s). For every AWAITING_SIGNATURE or SUBMITTED batch: read the latest
-   ledger, then look the hash up on Horizon. Found → settle as in step 5 (this also catches a
-   batch the company submitted somewhere else). Not found and the latest ledger closed after the
-   batch's maxTime → the transaction can never land → batch EXPIRED, lines back to PENDING.
+6. Confirmer (worker, every 5 s). For every AWAITING_SIGNATURE or SUBMITTED batch: read the funding
+   account and the latest ledger, THEN look the hash up (anything landed by then is findable).
+   Found → settle as in step 5 (this also catches a batch the company submitted somewhere else).
+   Not found and the latest ledger closed after the batch's maxTime → it can never land → EXPIRED,
+   lines back to PENDING. If the account has already used the batch's sequence number, a 404 may
+   be a lagging Horizon node, so expiry waits a further 2 minutes of ledger time. A SUBMITTED batch
+   with no answer inside its window is sent again (the same envelope can only land once).
 7. Finish. When a PAYING run has no PENDING or SENDING lines left it becomes PAID (every line paid),
    PARTIAL (some paid, some failed) or FAILED (none paid). Retry moves FAILED lines back to PENDING
    after a fresh check and the run back to PAYING. A PAID line never changes again.
+8. Cancel. A draft becomes CANCELLED. A run being paid (no open batch) cancels every line not yet
+   paid, PENDING and FAILED alike, so retry can't undo it; it ends CANCELLED if nobody was paid,
+   else PARTIAL. On a finished PARTIAL/FAILED run, cancel gives up on the failed lines.
 
 What protects each step
 Failure | Protection
@@ -58,14 +67,14 @@ Wallet (funding wallets): id, companyId, address, label, verifiedAt?, accountExi
 WalletChallenge: as before.
 Group: id, companyId, name (unique per company), createdAt.
 Employee: id, companyId, name, email?, role?, walletAddress, defaultAmountStroops BigInt, groupId?, archivedAt?, check fields (checkReason?, checkedAt?), createdAt, updatedAt. One active employee per (company, wallet).
-PayrollRun: id, companyId, number (per company), name, payDate?, walletId, walletAddress (snapshot), assetCode, assetIssuer, status, totalStroops, startedAt?, finishedAt?, notifiedAt?, createdAt, updatedAt.
+PayrollRun: id, companyId, number (per company), name, payDate?, walletId, walletAddress (snapshot), assetCode, assetIssuer, status, startedAt?, finishedAt?, notifiedAt?, createdAt, updatedAt. Totals are computed from the lines, never stored.
 PayrollItem: id, runId, companyId, employeeId?, position, name, walletAddress, amountStroops, status, failureCode?, failureDetail?, batchId?, opIndex?, txHash?, ledger?, paidAt?, attempts.
 PayrollBatch: id, runId, companyId, number, txHash (unique), envelopeXdr, signedXdr?, sequence, maxTime, opCount, totalStroops, status, resultCode?, ledger?, closedAt?, submittedAt?, settledAt?.
 PayrollEvent: append-only audit (runId, itemId?, batchId?, type, message, actor, createdAt).
 
 Statuses
-Run:   DRAFT → PAYING | CANCELLED; PAYING → PAID | PARTIAL | FAILED | CANCELLED; PARTIAL | FAILED → PAYING (retry). PAID and CANCELLED are final.
-Line:  PENDING → SENDING | FAILED | CANCELLED; SENDING → PAID | FAILED | PENDING; FAILED → PENDING (retry). PAID and CANCELLED are final.
+Run:   DRAFT → PAYING | CANCELLED; PAYING → PAID | PARTIAL | FAILED | CANCELLED; PARTIAL → PAYING (retry); FAILED → PAYING | CANCELLED. PAID and CANCELLED are final.
+Line:  PENDING → SENDING | FAILED | CANCELLED; SENDING → PAID | FAILED | PENDING; FAILED → PENDING (retry) | CANCELLED. PAID and CANCELLED are final.
 Batch: AWAITING_SIGNATURE → SUBMITTED | CONFIRMED | FAILED | EXPIRED; SUBMITTED → CONFIRMED | FAILED | EXPIRED. The rest are final.
 
 Failure codes on a line: ACCOUNT_NOT_FOUND, NO_TRUSTLINE, NOT_AUTHORIZED, TRUSTLINE_LIMIT_TOO_LOW, PAYMENT_FAILED (any other recipient-side op failure; failureDetail keeps the raw code).

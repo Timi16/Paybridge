@@ -104,11 +104,11 @@ Horizon errors throw HORIZON_UNAVAILABLE. Bulk loads run 8 at a time.
 
 Recipient check: account exists; a USDC trustline with the configured issuer, authorised; limit − balance −
 buying liabilities ≥ amount. Funding check: USDC balance − selling liabilities ≥ amount; XLM balance −
-selling liabilities − (2 + subentries + sponsoring − sponsored) × 0.5 XLM ≥ fee (100 stroops × ops).
+selling liabilities − (2 + subentries + sponsoring − sponsored) × 0.5 XLM ≥ fee (1000 stroops bid per op; Testnet charges the 100-stroop base fee unless it is congested).
 
 Op result → line: op_no_destination → ACCOUNT_NOT_FOUND; op_no_trust → NO_TRUSTLINE;
 op_not_authorized → NOT_AUTHORIZED; op_line_full → TRUSTLINE_LIMIT_TOO_LOW; op_success / op_underfunded /
-op_src_* → back to PENDING (not the recipient's fault); anything else → PAYMENT_FAILED.
+op_src_* / op_no_account / op_bad_auth → back to PENDING (not the recipient's fault); anything else → PAYMENT_FAILED.
 
 Worker
 confirmer every 5 s (batches AWAITING_SIGNATURE whose window opened, and SUBMITTED), notifier every 15 s,
@@ -140,14 +140,14 @@ R6  Next batch: ≤ 100 ops, one payment per line, correct sequence, memo and ti
 R7  Submit with a different transaction → 400 TX_MISMATCH
 R8  Submit success → lines PAID with hash, ledger, time; run PAID
 R9  tx_failed with op_no_trust on one op → that line FAILED (NO_TRUSTLINE), others back to PENDING, run stays PAYING
-R10 Submit times out → batch SUBMITTED; confirmer finds it → PAID
+R10 Submit times out → batch SUBMITTED; confirmer finds it → PAID; a signed batch the network never got is sent again inside its window
 R11 Batch submitted elsewhere (never through PayBridge) → confirmer finds it → PAID
 R12 Window passes (by ledger close time) with nothing on chain → EXPIRED, lines PENDING; next batch builds a new envelope
 R13 Retry: FAILED → PENDING only after a passing check; PAID lines are never queued again
-R14 Cancel: DRAFT → CANCELLED; PAYING without SENDING lines → remaining lines CANCELLED; with SENDING lines → 409
+R14 Cancel: DRAFT → CANCELLED; PAYING without SENDING lines → every unpaid line CANCELLED, run CANCELLED (nobody paid) or PARTIAL, retry can't undo it; with SENDING lines → 409
 R15 Finish: all paid → PAID; some → PARTIAL; none → FAILED
-R16 Same signed XDR submitted twice / submit racing the confirmer → settled once
-R17 Rejected before a ledger (tx_bad_seq) → batch FAILED, lines PENDING
+R16 Same signed XDR submitted twice / submit racing the confirmer / landed elsewhere first (our submit gets tx_bad_seq, a lagging node 404s) → settled once, as paid
+R17 Rejected before a ledger (tx_bad_seq, fee…) → not final: SUBMITTED until the ledger passes the window (plus 2 min if the sequence was used), then EXPIRED, lines PENDING
 
 System
 S1  Horizon down during check/start/batch → 503, nothing changes

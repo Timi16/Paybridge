@@ -36,6 +36,7 @@ beforeEach(async () => {
   t.stellar.ledgerTime = new Date();
   t.stellar.submits = 0;
   t.stellar.inFlight.length = 0;
+  t.stellar.lagging.clear();
 });
 afterAll(async () => {
   await prisma.$disconnect();
@@ -370,31 +371,78 @@ describe("payroll runs", () => {
     expect(t.stellar.usdcBalance(people[0]?.walletAddress ?? "")).toBe("1000.0000000");
   });
 
-  it("R17: tx_bad_seq (the account moved on) fails the batch and puts its lines back; other rejections wait for the window", async () => {
+  it("R17: a rejection before a ledger (here tx_bad_seq) is never taken as final: the batch waits, then expires by ledger time and the lines go back", async () => {
     const { company, wallet, people } = await setupPayroll(t, 1);
     const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
     await post(company, `/v1/payroll-runs/${run.id}/start`);
     const b = (await nextBatch(company, run.id)).batch!;
     t.stellar.bumpSequence(wallet.address); // the company sent something else from this wallet first
     const res = await submit(company, run.id, b, sign(b, wallet.keypair));
-    expect(res.body.batch).toMatchObject({ status: "FAILED", resultCode: "tx_bad_seq" });
-    expect(statuses(res.body.run)).toEqual(["PENDING"]);
+    expect(res.status).toBe(202);
+    expect(res.body.batch).toMatchObject({ status: "SUBMITTED", resultCode: "tx_bad_seq" });
+    expect((await nextBatch(company, run.id)).batch).toBeNull(); // nothing new while it could still land
+    // Past the window, but the sequence was used: wait out the grace period first.
+    t.stellar.closeLedger(301_000);
+    expect(await confirm()).toBe(0);
+    passWindow();
+    expect(await confirm()).toBe(1);
+    expect(statuses(await getRun(company, run.id))).toEqual(["PENDING"]);
+    t.stellar.ledgerTime = new Date(); // back in step with the server's clock
     const b2 = (await nextBatch(company, run.id)).batch!;
     expect(TransactionBuilder.fromXDR(b2.xdr, PASSPHRASE)).toMatchObject({ sequence: "102" });
+    expect(((await submit(company, run.id, b2, sign(b2, wallet.keypair))).body.run as Run).status).toBe("PAID");
+  });
 
-    // A rejection that does not prove the envelope is dead (here, a fee problem) keeps it open.
-    t.stellar.submitMode = { reject: "tx_insufficient_fee" };
-    const res2 = await submit(company, run.id, b2, sign(b2, wallet.keypair));
-    expect(res2.status).toBe(202);
-    expect(res2.body.batch).toMatchObject({ status: "SUBMITTED", resultCode: "tx_insufficient_fee" });
-    expect((await nextBatch(company, run.id)).batch).toBeNull();
-    passWindow();
-    await confirm();
-    expect((await prisma.payrollBatch.findUniqueOrThrow({ where: { id: b2.id } })).status).toBe("EXPIRED");
+  it("R16: a batch that landed elsewhere first, so PayBridge's own submit gets tx_bad_seq, is recorded as paid and never re-queued", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 2);
+    const run = await createRun(company, wallet, { employeeIds: people.map((p) => p.id) });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    const b = (await nextBatch(company, run.id)).batch!;
+    const signed = sign(b, wallet.keypair);
+    t.stellar.apply(signed); // e.g. the wallet also submitted it
+    t.stellar.lagging.add(b.txHash); // and the Horizon node PayBridge asks hasn't seen it yet
+    const res = await submit(company, run.id, b, signed);
+    expect(res.body.batch).toMatchObject({ status: "SUBMITTED", resultCode: "tx_bad_seq" });
+    expect(statuses(res.body.run)).toEqual(["SENDING", "SENDING"]);
+    // Even past the window, a lagging node's 404 is not trusted while the sequence is used.
+    t.stellar.closeLedger(301_000);
+    expect(await confirm()).toBe(0);
+    t.stellar.lagging.clear();
+    expect(await confirm()).toBe(1);
+    const after = await getRun(company, run.id);
+    expect(after.status).toBe("PAID");
+    expect(t.stellar.usdcBalance(people[0]?.walletAddress ?? "")).toBe("1000.0000000");
+  });
+
+  it("R10: a signed batch the network never received is sent again by the confirmer while its window is open", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 1);
+    const run = await createRun(company, wallet, { employeeIds: [people[0]?.id] });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    const b = (await nextBatch(company, run.id)).batch!;
+    t.stellar.submitMode = { reject: "tx_insufficient_fee" }; // e.g. a fee surge
+    expect((await submit(company, run.id, b, sign(b, wallet.keypair))).status).toBe(202);
     t.stellar.submitMode = "apply";
-    t.stellar.ledgerTime = new Date(); // back in step with the server's clock
-    const b3 = (await nextBatch(company, run.id)).batch!;
-    expect(((await submit(company, run.id, b3, sign(b3, wallet.keypair))).body.run as Run).status).toBe("PAID");
+    expect(await confirm()).toBe(1);
+    expect((await getRun(company, run.id)).status).toBe("PAID");
+    expect(t.stellar.submits).toBe(2);
+  });
+
+  it("R14: cancelling part-way leaves the run PARTIAL (not PAID), cancels failed lines too, and retry can't undo it", async () => {
+    const { company, wallet, people } = await setupPayroll(t, 3);
+    t.stellar.noTrustline(people[2]?.walletAddress ?? "");
+    const run = await createRun(company, wallet, { employeeIds: people.map((p) => p.id) });
+    await post(company, `/v1/payroll-runs/${run.id}/start`);
+    // Pay only the first person, then cancel the rest.
+    const b = (await nextBatch(company, run.id)).batch!;
+    expect(b.opCount).toBe(2);
+    await submit(company, run.id, b, sign(b, wallet.keypair));
+    await prisma.$executeRaw`UPDATE "PayrollItem" SET status = 'PENDING', "txHash" = NULL, "paidAt" = NULL WHERE "runId" = ${run.id} AND position = 2`;
+    await prisma.$executeRaw`UPDATE "PayrollRun" SET status = 'PAYING', "finishedAt" = NULL WHERE id = ${run.id}`;
+    const cancelled = (await post(company, `/v1/payroll-runs/${run.id}/cancel`)).body.run as Run;
+    expect(cancelled.status).toBe("PARTIAL");
+    expect(statuses(cancelled)).toEqual(["PAID", "CANCELLED", "CANCELLED"]);
+    expect(cancelled.events.at(-1)?.message).toContain("Cancelled after 1 paid");
+    expect((await post(company, `/v1/payroll-runs/${run.id}/retry`)).body.error.code).toBe("NOTHING_TO_PAY");
   });
 });
 

@@ -23,7 +23,7 @@
     "@paybridge/shared": "workspace:*",
     "@prisma/client": "^6.0.0",
     "@scalar/express-api-reference": "*",
-    "@stellar/stellar-sdk": "*",
+    "@stellar/stellar-sdk": "17.2.1",
     "argon2": "*",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
